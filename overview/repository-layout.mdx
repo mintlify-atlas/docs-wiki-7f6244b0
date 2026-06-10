@@ -1,0 +1,255 @@
+---
+title: "Repository layout: subprojects and directories"
+sidebarTitle: "Repository Layout"
+description: "Annotated directory map of the Apache Fineract repository — every Gradle subproject, top-level package, and support directory mapped to purpose."
+---
+
+The Apache Fineract repository is a multi-module Gradle build. At the root sit a few build files, a docker compose matrix that lets you stand up the stack against any supported database, and a tree of subprojects that each own one architectural concern. This page is a flat reference: every directory you see at `ls` time is named and explained, and every Gradle subproject in `settings.gradle` has its own row with the package root and a handful of representative files.
+
+Use it together with the [module graph](/overview/module-graph) page, which adds the dependency arrows on top of this static layout.
+
+## Top-level directories
+
+| Path | What it is |
+|------|------------|
+| `build.gradle` | Root build script. Plugin versions, common configuration applied to all subprojects. |
+| `settings.gradle` | Lists every subproject and dynamically picks up custom modules under `custom/`. |
+| `static-weaving.gradle` | EclipseLink static-weaving Gradle plugin configuration shared by JPA modules. |
+| `gradle.properties` | Default JVM args, Gradle parallel flags, project version. |
+| `gradle/`, `gradlew`, `gradlew.bat` | Wrapper scripts and wrapper jar. |
+| `buildSrc/` | Project-local Gradle plugins and conventions (Java toolchain, Spotless, JaCoCo). |
+| `config/` | Static configuration shared across modules: `checkstyle/`, `spotbugs/`, `liquibase/` master changelogs, Docker tooling, Eclipse formatter. |
+| `custom/` | Customer-specific modules loaded dynamically by `settings.gradle`. Ships with one example: `custom/acme/`. |
+| `docker/` | Dockerfiles referenced by the docker-compose stacks. |
+| `kubernetes/` | Helm chart and raw manifests for cluster deployment. |
+| `scripts/` | Maintenance scripts: Liquibase DDL safety check, JPA scanner, test/feature splitters, signed-commit verification. |
+| `CHANGELOG.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `README.md` | Standard ASF project metadata. |
+| `LICENSE_*`, `NOTICE_*`, `APACHE_LICENSETEXT.md` | License and notice files for source vs. release. |
+| `STATIC_WEAVING.md` | Developer note on EclipseLink static weaving. |
+| `lombok.config` | Disables `var`, fixes Lombok with EclipseLink. |
+| `renovate.json` | Renovate bot dependency-update rules. |
+
+## Docker compose matrix
+
+Each compose file targets a specific database, broker, or auth mode.
+
+| File | Purpose |
+|------|---------|
+| `docker-compose.yml` | Default development stack. |
+| `docker-compose-mariadb.yml` / `-mariadb-test.yml` | MariaDB persistence; the `-test` variant is tuned for CI. |
+| `docker-compose-mysql.yml` / `-mysql-test.yml` | MySQL persistence variants. |
+| `docker-compose-postgresql.yml` / `-postgresql-test.yml` | PostgreSQL persistence variants. |
+| `docker-compose-postgresql-activemq.yml` / `-postgresql-test-activemq.yml` | PostgreSQL + ActiveMQ external events. |
+| `docker-compose-postgresql-kafka.yml` / `-postgresql-kafka-msk.yml` | PostgreSQL + Kafka (self-hosted or AWS MSK). |
+| `docker-compose-oauth2-test.yml` | Adds a Keycloak realm for the OAuth2 test suite. |
+| `docker-compose-twofactor-test.yml` | Enables the 2FA test profile. |
+| `docker-compose-development.yml` | Mounts source for live debugging. |
+| `docker-compose-web-app.yml`, `-community-app.yml` | Adds the Mifos X web UI. |
+| `docker-compose-custom.yml` | Builds the custom image with `custom/` modules included. |
+
+## Subprojects
+
+The full list comes from `settings.gradle`. Below, each Gradle module has its path, what it owns, the root Java package, and a few files worth opening first.
+
+### Core platform
+
+| Project | Purpose | Package root | Key files |
+|---------|---------|--------------|-----------|
+| `fineract-core` | Domain primitives, JPA config, JSON command parsing, business date, tenant infra | `org.apache.fineract.infrastructure.core`, `org.apache.fineract.commands` | `FineractContext.java`, `FineractProperties.java`, `CommandWrapperBuilder.java`, `JsonCommand.java`, `BusinessDateApiResource.java` |
+| `fineract-security` | Spring Security wiring, BasicAuth + OAuth2 + 2FA filters | `org.apache.fineract.infrastructure.security` | `PlatformSecurityContext.java`, `TenantAwareBasicAuthenticationFilter.java`, `WebSecurityConfig.java` |
+| `fineract-validation` | Custom Hibernate Validator constraints | `org.apache.fineract.infrastructure.validation` | `DataValidatorBuilder.java`, `ApiParameterError.java` |
+| `fineract-cob` | Close-of-Business Spring Batch engine | `org.apache.fineract.cob` | `LoanCOBManagerService.java`, `BusinessDateResolver.java`, COB tasklet classes |
+
+### Command bus
+
+| Project | Purpose | Key files |
+|---------|---------|-----------|
+| `fineract-command` | Bus abstractions, `CommandSource` entity, default synchronous processor | `SynchronousCommandProcessingService.java`, `CommandHandlerProvider.java`, `CommandSource.java` |
+| `fineract-command-jdbc` | JDBC repository for `m_portfolio_command_source` | `CommandSourceJdbcRepository.java` |
+| `fineract-command-audit` | Before/after JSON snapshot decorator | `AuditingCommandSourceWriter.java` |
+| `fineract-command-async` | Async dispatch using Spring `@Async` | `AsyncCommandProcessingService.java` |
+| `fineract-command-disruptor` | LMAX Disruptor backed dispatch for high-write tenants | `DisruptorCommandProcessingService.java` |
+| `fineract-command-test` | Shared test fixtures for command-bus modules | unit-test base classes |
+
+### Portfolio products
+
+| Project | Purpose | Key files |
+|---------|---------|-----------|
+| `fineract-loan` | Standard declining-balance loans | `Loan.java`, `LoanProduct.java`, `LoanWritePlatformService.java`, `LoanRepaymentScheduleInstallment.java` |
+| `fineract-progressive-loan` | Progressive amortization product variant | `ProgressiveLoanInterestScheduleModel.java`, `ProgressiveLoanScheduleGenerator.java` |
+| `fineract-progressive-loan-embeddable-schedule-generator` | Reusable schedule generator embeddable in other JVMs | `EmbeddableProgressiveLoanScheduleGenerator.java` |
+| `fineract-working-capital-loan` | Working-capital revolving credit | working-capital `LoanProduct` extensions, drawdown handlers |
+| `fineract-loan-origination` | Pre-disbursement application workflow | loan application command handlers and stages |
+| `fineract-savings` | Savings, recurring deposit, fixed deposit accounts | `SavingsAccount.java`, `SavingsAccountWritePlatformService.java`, `DepositAccountReadPlatformService.java` |
+| `fineract-investor` | Securitization, external asset owners | `ExternalAssetOwner.java`, `ExternalAssetOwnerTransfer.java` |
+| `fineract-charge` | Fees and penalties applicable to loans and savings | `Charge.java`, `ChargeWritePlatformService.java` |
+| `fineract-rates` | Floating interest rates and rate periods | `FloatingRate.java`, `FloatingRatePeriod.java` |
+| `fineract-tax` | Tax groups and tax components for charges and interest | `TaxComponent.java`, `TaxGroup.java` |
+| `fineract-branch` | Office hierarchy, staff, holidays, working days | `Office.java`, `Staff.java`, `Holiday.java`, `WorkingDays.java` |
+
+### Cross-cutting business modules
+
+| Project | Purpose | Key files |
+|---------|---------|-----------|
+| `fineract-accounting` | Chart of accounts, journal entries, AccountingBridge | `JournalEntry.java`, `GLAccount.java`, `AccountingBridgeImpl.java`, `ProductToGLAccountMapping.java` |
+| `fineract-document` | Attachments (loan documents, KYC) | `Document.java`, `DocumentWritePlatformService.java` |
+| `fineract-report` | Pentaho/Jasper report registration and execution | `ReportingProcessService.java`, `Report.java` |
+| `fineract-mix` | MIX Market regulatory reports | `XBRLBuilder.java`, `MixTaxonomy.java` |
+
+### Packaging and runtime
+
+| Project | Purpose | Key files |
+|---------|---------|-----------|
+| `fineract-provider` | Runnable Spring Boot app: API resources, Jersey, Quartz, COB wiring | `ServerApplication.java`, `JerseyConfig.java`, `application.properties`, `LoansApiResource.java` |
+| `fineract-war` | WAR packaging that bundles `fineract-provider` and all portfolio modules | `build.gradle` (assembles WAR) |
+| `fineract-db` | Liquibase master changelog plus per-tenant changelog | `db/changelog/tenant/`, `db/changelog/default/` |
+| `fineract-avro-schemas` | Avro IDL for external events; generates a Java SDK | `*.avsc`, `buildJavaSdk` task output |
+
+### Client SDKs and docs
+
+| Project | Purpose | Key files |
+|---------|---------|-----------|
+| `fineract-client` | OpenAPI-generated Java client (Retrofit) | generated under `build/` |
+| `fineract-client-feign` | OpenAPI-generated Java client (Feign) | `TenantIdRequestInterceptor.java` |
+| `fineract-doc` | Asciidoctor user and developer guide | `src/docs/en/`, generated HTML |
+
+### Test harnesses
+
+| Project | Purpose | Key files |
+|---------|---------|-----------|
+| `integration-tests` | REST-Assured integration tests against a running server | `*Test.java` under `src/test`, `common/` helpers |
+| `fineract-e2e-tests-core` | Cucumber step library and test runtime | `*.feature`, step definition classes |
+| `fineract-e2e-tests-runner` | Executable runner that wires features and steps | `RunnerApplication.java` |
+| `oauth2-tests` | OAuth2 mode integration tests | uses Keycloak from compose |
+| `twofactor-tests` | 2FA mode integration tests | OTP scenarios |
+
+### Customer extensions
+
+The `custom/` directory is special: `settings.gradle` walks it three levels deep (`custom/<company>/<category>/<module>`) and includes any matching Gradle module automatically. The repository ships with `custom/acme/` as a worked example and `custom/docker/` for building a custom image. See [Module graph](/overview/module-graph) for how the loader works.
+
+## Inside a typical subproject
+
+Most Java subprojects follow the same internal layout:
+
+```text
+fineract-<module>/
+├── build.gradle           # apply plugin: 'java', plugin: 'eclipse'
+├── dependencies.gradle    # implementation project(':fineract-core'), ...
+└── src/
+    ├── main/
+    │   ├── java/org/apache/fineract/...
+    │   └── resources/
+    └── test/
+        ├── java/...
+        └── resources/
+```
+
+<Note>
+A handful of subprojects keep dependencies inline in `build.gradle` instead of a separate `dependencies.gradle` — `fineract-war` is the most visible example. Treat the `dependencies.gradle` convention as a soft rule, not a hard one.
+</Note>
+
+## Cookbook: finding things fast
+
+<AccordionGroup>
+  <Accordion title="Where do API endpoints live?">
+    Resource classes are in `fineract-provider/src/main/java/.../api/`, grouped by domain (`loanaccount/api/`, `savings/api/`). Their URL paths are declared with `@Path` annotations on the class.
+  </Accordion>
+  <Accordion title="Where is the database schema?">
+    `fineract-db/src/main/resources/db/changelog/tenant/` for per-tenant tables, `.../default/` for the cross-tenant tenant-list database. Master file: `db.changelog-master.xml`.
+  </Accordion>
+  <Accordion title="Where do command handlers live?">
+    Each portfolio module owns its handlers under `…/handler/`, e.g. `fineract-loan/src/main/java/org/apache/fineract/portfolio/loanaccount/handler/`.
+  </Accordion>
+  <Accordion title="Where are Quartz jobs declared?">
+    The enum `org.apache.fineract.infrastructure.jobs.service.JobName` in `fineract-core` lists every scheduled job. Implementations are scattered across portfolio modules.
+  </Accordion>
+  <Accordion title="Where is COB defined?">
+    `fineract-cob/src/main/java/org/apache/fineract/cob/` contains Spring Batch tasklets. The orchestrator is `LoanCOBManagerService`.
+  </Accordion>
+  <Accordion title="Where are external event schemas?">
+    `fineract-avro-schemas/src/main/avro/` holds `.avsc` files. `fineract-provider` produces them through `ExternalEventProducer` implementations.
+  </Accordion>
+</AccordionGroup>
+
+## Inside `fineract-provider`
+
+Because `fineract-provider` is the only runnable module, knowing its internal layout pays off when you are tracing endpoints or wiring beans.
+
+| Path inside `fineract-provider/src/main/java/org/apache/fineract` | Contents |
+|------------------------------------------------------------------|----------|
+| `ServerApplication.java` | Spring Boot main / WAR initializer. |
+| `infrastructure/core/boot/` | `FineractWebApplicationConfiguration`, `FineractLiquibaseOnlyApplicationConfiguration`, condition classes. |
+| `infrastructure/jersey/` | `JerseyConfig` and the registered API resource list. |
+| `infrastructure/jobs/api/` | Scheduler control endpoints. |
+| `infrastructure/security/` | Web security configuration, `TenantAwareBasicAuthenticationFilter`, OAuth2 setup. |
+| `portfolio/*/api/` | API resource classes for loans, savings, clients, groups, charges, accounting. |
+| `batch/api/BatchApiResource.java` | The `/batches` aggregation endpoint. |
+| `spm/` | Social Performance Management module (Survey/SPM). |
+
+## Inside `fineract-core`
+
+Almost every other subproject depends on `fineract-core`. Its internal directories map cleanly to architectural concerns.
+
+| Path inside `fineract-core/src/main/java/org/apache/fineract` | Contents |
+|---------------------------------------------------------------|----------|
+| `commands/` | Command bus abstractions and `CommandWrapperBuilder`. |
+| `infrastructure/core/api/` | `JsonCommand` and the JSON parsing helpers. |
+| `infrastructure/core/boot/` | Profile constants (`FineractProfiles`). |
+| `infrastructure/core/config/` | `FineractProperties`, `JdbcConfig`, `HikariCpConfig`. |
+| `infrastructure/core/domain/` | `FineractContext`, `ExternalId`. |
+| `infrastructure/core/service/database/` | `JdbcSupport`, `RoutingDataSource`. |
+| `infrastructure/core/service/tenant/` | Tenant lookup and `ThreadLocalContextUtil`. |
+| `infrastructure/businessdate/` | Per-tenant business-date model and REST resource. |
+| `infrastructure/event/business/` | `BusinessEvent` and dispatcher. |
+| `infrastructure/event/external/` | External-event abstractions (Kafka/ActiveMQ producers live in `fineract-provider`). |
+| `infrastructure/jobs/service/` | `JobName` enum and scheduler service interfaces. |
+| `useradministration/domain/` | `AppUser`, `Role`, `Permission`. |
+
+## Tests, fixtures, and tooling
+
+The repo keeps four parallel test surfaces. Knowing which to use saves time:
+
+| Surface | Module | Style | When to use |
+|---------|--------|-------|-------------|
+| Unit tests | Inside each subproject's `src/test/java/` | JUnit 5 + Mockito | Pure logic — schedule generation, validators, mappers. |
+| Integration tests | `integration-tests/` | REST-Assured against a live server | API contract checks, command-bus end-to-end. |
+| Auth mode tests | `oauth2-tests/`, `twofactor-tests/` | REST-Assured plus mode-specific compose stack | Verify behaviour under OAuth2 or 2FA only. |
+| E2E scenarios | `fineract-e2e-tests-core/` + `…-runner/` | Cucumber feature files | High-level business scenarios spanning many endpoints. |
+
+Tooling lives in `scripts/`:
+
+| Script | Purpose |
+|--------|---------|
+| `check-liquibase-ddl-safety.sh` | Flags potentially destructive DDL in pending Liquibase changesets. |
+| `jpa-scanner-grouped.sh` | Lists JPA entities grouped by module to spot wiring drift. |
+| `split-features.sh`, `split-tests.sh` | Shard Cucumber features and JUnit tests for parallel CI. |
+| `verify-signed-commits.sh` | Confirms commit signatures against the contributors file. |
+
+## Build-time configuration shared across modules
+
+| Path | What it owns |
+|------|--------------|
+| `config/checkstyle/` | Checkstyle rules applied to every subproject. |
+| `config/spotbugs/` | SpotBugs exclude filter and rules. |
+| `config/liquibase/` | Standalone Liquibase tooling configuration. |
+| `config/docker/` | Auxiliary Dockerfiles used by some compose stacks. |
+| `config/fineractdev-*` | Eclipse formatter and cleanup preferences for contributors. |
+| `lombok.config` | Lombok project-wide settings (e.g. disable `var`, set chain default). |
+| `static-weaving.gradle` | Shared EclipseLink static weaving configuration; applied by every JPA module. |
+
+## What to read next
+
+<CardGroup cols={2}>
+  <Card title="Module graph" icon="diagram-project" href="/overview/module-graph">
+    The dependency arrows on top of this layout.
+  </Card>
+  <Card title="Architecture" icon="layer-group" href="/overview/architecture">
+    How a request flows through these modules.
+  </Card>
+  <Card title="Runtime model" icon="play" href="/overview/runtime-model">
+    How the layout boots into a running process.
+  </Card>
+  <Card title="Glossary" icon="book" href="/overview/glossary">
+    Domain vocabulary with file pointers.
+  </Card>
+</CardGroup>

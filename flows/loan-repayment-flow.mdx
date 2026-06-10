@@ -1,0 +1,296 @@
+---
+title: "Loan repayment end-to-end flow"
+sidebarTitle: "Loan Repayment"
+description: "A complete trace of a Apache Fineract loan repayment: API parsing, transaction-processor selection, allocation per strategy, schedule update, summary recompute, journal entries, business events, and command audit."
+---
+
+A repayment is the busiest write path in Apache Fineract. A single `POST /api/v1/loans/{loanId}/transactions?command=repayment` walks through validation, transaction-processor strategy selection, allocation across installments, schedule and summary recomputation, journal entries, lifecycle transitions, and several business events — all inside one `@Transactional` boundary anchored by the command dispatcher. This page traces that path against the current sources.
+
+## Files involved
+
+| Role | File |
+| --- | --- |
+| JAX-RS resource | `fineract-provider/src/main/java/org/apache/fineract/portfolio/loanaccount/api/LoanTransactionsApiResource.java:296` (`executeLoanTransaction`) |
+| Wrapper builder | `fineract-core/src/main/java/org/apache/fineract/commands/service/CommandWrapperBuilder.java:1208` |
+| Dispatcher | `fineract-core/.../SynchronousCommandProcessingService.java:91` |
+| Handler | `fineract-loan/src/main/java/org/apache/fineract/portfolio/loanaccount/handler/LoanRepaymentCommandHandler.java:36` |
+| Write service entry | `fineract-provider/.../LoanWritePlatformServiceJpaRepositoryImpl.java:961` (`makeLoanRepayment`) |
+| Domain service | `fineract-provider/.../LoanAccountDomainServiceJpa.java:216` (`makeRepayment`) |
+| Down-payment service | `fineract-loan/.../service/LoanDownPaymentHandlerServiceImpl.java:82` (`handleRepaymentOrRecoveryOrWaiverTransaction`) |
+| Transaction processor | `LoanTransactionProcessingServiceImpl.processLatestTransaction` (`fineract-provider/.../service/LoanTransactionProcessingServiceImpl.java:96`) |
+| Processor factory | `LoanRepaymentScheduleTransactionProcessorFactory` (`fineract-loan/.../domain/`) |
+| Journal entry bridge | `LoanJournalEntryPoster#postJournalEntriesForLoanTransaction` |
+| Events | `LoanTransactionMadeBusinessEvent`, `LoanBalanceChangedBusinessEvent`, `LoanTransactionGreaterThanInstallmentBusinessEvent` |
+
+## How the resource builds the command
+
+The dispatch starts in `LoanTransactionsApiResource.executeTransaction` (`fineract-provider/.../api/LoanTransactionsApiResource.java:550`). When `commandParam == "repayment"`:
+
+```java
+if (CommandParameterUtil.is(commandParam, "repayment")) {
+    commandRequest = builder.loanRepaymentTransaction(resolvedLoanId).build();
+}
+...
+final CommandProcessingResult result = this.commandsSourceWritePlatformService.logCommandSource(commandRequest);
+return this.toApiJsonSerializer.serialize(result);
+```
+*(L558-559, L611-612)*
+
+`CommandWrapperBuilder.loanRepaymentTransaction(loanId)` (`CommandWrapperBuilder.java:1208`):
+
+```java
+this.actionName = ACTION_REPAYMENT;
+this.entityName = ENTITY_LOAN;
+this.entityId = null;
+this.loanId = loanId;
+this.href = "/loans/" + loanId + "/transactions/template?command=repayment";
+```
+
+`CommandHandlerProvider.getHandler("LOAN", "REPAYMENT")` then resolves to `LoanRepaymentCommandHandler`.
+
+## The handler
+
+```java
+@Service
+@RequiredArgsConstructor
+@CommandType(entity = "LOAN", action = "REPAYMENT")
+public class LoanRepaymentCommandHandler implements NewCommandSourceHandler {
+    private final LoanWritePlatformService writePlatformService;
+    private final DataIntegrityErrorHandler dataIntegrityErrorHandler;
+
+    @Transactional
+    @Override
+    public CommandProcessingResult processCommand(final JsonCommand command) {
+        try {
+            boolean isRecoveryRepayment = false;
+            return this.writePlatformService.makeLoanRepayment(LoanTransactionType.REPAYMENT, command.getLoanId(), command,
+                    isRecoveryRepayment);
+        } catch (final JpaSystemException | DataIntegrityViolationException dve) {
+            dataIntegrityErrorHandler.handleDataIntegrityIssues(command, dve.getMostSpecificCause(), dve, "loan.repayment", "Repayment");
+            return CommandProcessingResult.empty();
+        }
+    }
+}
+```
+*(`LoanRepaymentCommandHandler.java:33-51`)*
+
+The first parameter of `makeLoanRepayment` is the transaction type. The same write service method is reused by `MerchantIssuedRefund`, `PayoutRefund`, `GoodwillCredit`, `InterestPaymentWaiver` handlers, each passing a different `LoanTransactionType` enum value.
+
+## End-to-end sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant Resource as LoanTransactionsApiResource<br/>executeTransaction L550
+    participant Builder as CommandWrapperBuilder<br/>loanRepaymentTransaction L1208
+    participant Portfolio as PortfolioCommandSourceWritePlatformServiceImpl<br/>logCommandSource
+    participant Sync as SynchronousCommandProcessingService<br/>executeCommand
+    participant CSS as CommandSourceService
+    participant DB as m_portfolio_command_source
+    participant Handler as LoanRepaymentCommandHandler<br/>processCommand L42
+    participant Write as LoanWritePlatformServiceJpaRepositoryImpl<br/>makeLoanRepayment L961
+    participant Domain as LoanAccountDomainServiceJpa<br/>makeRepayment L216
+    participant Val as LoanTransactionValidator
+    participant Bus as BusinessEventNotifierService
+    participant Assembler as LoanAssembler
+    participant JPA as EntityManager
+    participant LoanDB as m_loan / schedule / transactions
+    participant Pay as PaymentDetailWritePlatformService
+    participant ScheduleDTO as loanUtilService.buildScheduleGeneratorDTO
+    participant DownPay as LoanDownPaymentHandlerServiceImpl<br/>handleRepaymentOrRecoveryOrWaiverTransaction L82
+    participant ProcSvc as LoanTransactionProcessingServiceImpl<br/>processLatestTransaction L96
+    participant Factory as LoanRepaymentScheduleTransactionProcessorFactory<br/>determineProcessor L129
+    participant Proc as LoanRepaymentScheduleTransactionProcessor<br/>(strategy bean)
+    participant SchedSvc as LoanScheduleService
+    participant Reproc as ReprocessLoanTransactionsService
+    participant Accrual as LoanAccrualsProcessingService
+    participant Lifecycle as LoanLifecycleStateMachine
+    participant Balance as LoanBalanceService<br/>updateLoanSummaryDerivedFields
+    participant GL as LoanJournalEntryPoster
+    participant GLDB as acc_gl_journal_entry
+    participant Tag as LoanAccountDomainService<br/>setLoanDelinquencyTag
+
+    Client->>Resource: POST /api/v1/loans/{loanId}/transactions?command=repayment<br/>{ transactionDate, transactionAmount, paymentTypeId, externalId, note }
+    Resource->>Builder: builder.withJson(body).loanRepaymentTransaction(loanId) L558
+    Resource->>Portfolio: commandsSourceWritePlatformService.logCommandSource(cmd) L611
+    Portfolio->>Sync: executeCommand(wrapper, command, false)
+    Sync->>CSS: saveInitialNewTransaction(...)
+    CSS->>DB: INSERT m_portfolio_command_source(action=REPAYMENT, entity=LOAN, status=UNDER_PROCESSING)
+    Sync->>Handler: processCommand(command) via CommandSourceService.processCommand
+    Handler->>Write: makeLoanRepayment(REPAYMENT, loanId, cmd, false) L44
+    Write->>Domain: loanAccountDomainService.makeRepayment(REPAYMENT, loan, txnDate, amount, paymentDetail, ...) L1130
+    Domain->>Val: validateLoanNotClosedOrOverpaidForTransactions(loan, REPAYMENT) L219
+    Domain->>Bus: notifyPreBusinessEvent(getLoanRepaymentTypeBusinessEvent(...)) L222
+    Bus->>Bus: pre-listeners
+    Domain->>Domain: build LoanTransaction.repaymentType(...) L237
+    Domain->>ScheduleDTO: buildScheduleGeneratorDTO(loan, recalcFrom, txnDate, holidayDto) L246
+    Domain->>Domain: calculateRecalculateTillDate (for prepay) L252
+    Domain->>Val: validateRepaymentDateIsOnHoliday / NonWorkingDay L256-261
+    Domain->>Val: validateActivityNotBeforeLastTransactionDate L264
+    Domain->>Val: validateRepaymentTypeAccountStatus L265
+    Domain->>Val: validateActivityNotBeforeClientOrGroupTransferDate L266
+    Domain->>Domain: makeRepayment(loan, newRepaymentTransaction, scheduleGeneratorDTO) L270
+    Domain->>DownPay: handleRepaymentOrRecoveryOrWaiverTransaction(loan, txn, null, dto) L1020
+    DownPay->>DownPay: validate amount thresholds, future dates, recovery limits L93-127
+    DownPay->>DownPay: loan.addLoanTransaction(loanTransaction) L100
+    DownPay->>DownPay: isTransactionChronologicallyLatest? L96
+    alt latest, no adjustment, not foreclosure, can process latest only
+        DownPay->>ProcSvc: processLatestTransaction(strategyCode, txn, ctx) L141
+        ProcSvc->>Factory: determineProcessor(strategyCode) L129
+        Factory-->>ProcSvc: LoanRepaymentScheduleTransactionProcessor instance<br/>(creocore, declining_balance_interest_recalc,<br/>progressive, etc.)
+        ProcSvc->>Proc: processLatestTransaction(loanTransaction, ctx) L104
+        Proc->>Proc: allocate amount across installments<br/>(penalties → fees → interest → principal,<br/>per strategy)
+        Proc->>Proc: mutate LoanTransaction.principalPortion,<br/>interestPortion, feeChargesPortion, penaltyChargesPortion
+        Proc->>Proc: mark installments as paid;<br/>update LoanCharge.amountPaid
+        Proc-->>ProcSvc: ChangedTransactionDetail
+        ProcSvc-->>DownPay: result
+        opt cumulative + interest recalc and tail conditions
+            DownPay->>DownPay: reprocessOnPostConditions = true L150-159
+        end
+    end
+    alt not latest, or post-conditions require reprocess
+        alt cumulative + interest recalc
+            DownPay->>SchedSvc: regenerateRepaymentScheduleWithInterestRecalculation(loan, dto) L163
+        else progressive
+            DownPay->>SchedSvc: regenerateRepaymentSchedule(loan, dto) L165
+        end
+        DownPay->>Reproc: reprocessTransactions(loan) L167
+        Reproc->>Proc: replay every non-reversed transaction<br/>against the regenerated schedule
+    end
+    alt not recovery
+        DownPay->>Lifecycle: determineAndTransition(loan, txnDate) L173
+        Lifecycle->>Lifecycle: LOAN_REPAYMENT_OR_WAIVER → maybe CLOSED_OBLIGATIONS_MET / OVERPAID
+    else recovery
+        DownPay->>Balance: updateLoanSummaryDerivedFields(loan) L175
+    end
+    DownPay->>DownPay: multi-disburse over-credit check + transition to overpaid L179-194
+    Domain-->>Write: newRepaymentTransaction (mutated with allocation portions)
+    Write->>Accrual: reprocessExistingAccruals(loan, true) (when interest recalc enabled) L1138
+    Write->>Accrual: processIncomePostingAndAccruals(loan, true) L1139
+    Write->>JPA: saveLoanTransactionWithDataIntegrityViolationChecks(newRepaymentTransaction)
+    JPA->>LoanDB: INSERT m_loan_transaction(type=REPAYMENT, principal_portion_derived,<br/>interest_portion_derived, fee_charges_portion_derived, penalty_charges_portion_derived)
+    Write->>GL: journalEntryPoster.postJournalEntriesForLoanTransaction(txn, false, false)
+    GL->>GLDB: INSERT acc_gl_journal_entry<br/>(Dr Fund Source / Cr Loan Portfolio, plus interest / fee / penalty income legs)
+    Write->>JPA: saveAndFlushLoanWithDataIntegrityViolationChecks(loan)
+    JPA->>LoanDB: UPDATE m_loan, m_loan_repayment_schedule, m_loan_charge
+    Write->>Tag: loanAccountDomainService.setLoanDelinquencyTag(loan, txnDate)
+    Tag->>LoanDB: update m_loan_arrears_aging / delinquency classification
+    Write->>Bus: notifyPostBusinessEvent(LoanTransactionMadeBusinessEvent or specific subtype)
+    Write->>Bus: notifyPostBusinessEvent(LoanBalanceChangedBusinessEvent)
+    alt amount > installment due
+        Write->>Bus: notifyPostBusinessEvent(LoanTransactionGreaterThanInstallmentBusinessEvent)
+    end
+    Bus->>Bus: queue ExternalEvent rows (status TO_BE_SENT) on tx commit
+    Write-->>Handler: CommandProcessingResultBuilder.build()<br/>(entityId=loanId, subEntityId=repaymentTxnId, ...)
+    Handler-->>Sync: result
+    Sync->>CSS: saveResultInTransaction(commandSource)
+    CSS->>DB: UPDATE m_portfolio_command_source SET status=PROCESSED, result_status_code=200, resource_id=loanId, sub_resource_id=txnId
+    Sync->>Sync: publishHookEvent("LOAN","REPAYMENT", command, result)
+    Sync-->>Portfolio: result
+    Portfolio-->>Resource: result
+    Resource-->>Client: 200 OK + result JSON
+```
+
+## Step-by-step
+
+### 1 — Request parsing and command construction
+
+`LoanTransactionsApiResource.executeTransaction` (`LoanTransactionsApiResource.java:550`) inspects `commandParam`. The `repayment` branch (L558) builds the wrapper; every other branch — `merchantIssuedRefund`, `goodwillCredit`, `payoutRefund`, etc. — fans into a different `LoanWritePlatformService` entry point but ultimately reaches the same `LoanAccountDomainServiceJpa.makeRepayment` with a different `LoanTransactionType`. The wrapper is dispatched through the same `PortfolioCommandSourceWritePlatformServiceImpl.logCommandSource` (L611) we covered on the [Command execution flow](/flows/command-execution-flow) page.
+
+### 2 — `makeLoanRepayment` entry
+
+`LoanWritePlatformServiceJpaRepositoryImpl.makeLoanRepayment` (`LoanWritePlatformServiceJpaRepositoryImpl.java:961`) is a thin wrapper that delegates to `makeLoanRepaymentWithChargeRefundChargeType(repaymentTransactionType, loanId, command, isRecoveryRepayment, chargeRefundChargeType=null)` (L1100). The latter parses the body into `transactionDate`, `transactionAmount`, `paymentDetail`, `noteText`, `txnExternalId`, then calls `loanAccountDomainService.makeRepayment(...)` (L1130).
+
+### 3 — Domain service
+
+`LoanAccountDomainServiceJpa.makeRepayment` (`LoanAccountDomainServiceJpa.java:216`) is where the business orchestration sits. It:
+
+1. **Validates client/group state** and that the loan is not closed/overpaid (`validateLoanNotClosedOrOverpaidForTransactions`, L219).
+2. **Fires the pre-event** matching the transaction type — for plain repayment, `LoanTransactionMadeBusinessEvent`; for the others, a specific subtype (`getLoanRepaymentTypeBusinessEvent(...)`, L221-222).
+3. **Builds the `LoanTransaction`** — `LoanTransaction.repaymentType(...)` (L237) or `LoanTransaction.recoveryRepayment(...)` (L234) carrying the amount, payment detail, date, external id.
+4. **Calculates schedule-recalc bounds** — `recalculateFrom` is set when interest recalculation is enabled (L244), and `calculateRecalculateTillDate` (L252) figures out the prepayment horizon.
+5. **Holiday / activity validation** — date validations against `HolidayDetailDTO`, last transaction date, client/group transfer date (L256-266).
+6. Calls `makeRepayment(loan, newRepaymentTransaction, scheduleGeneratorDTO)` (L270), which delegates to `LoanDownPaymentHandlerServiceImpl.handleRepaymentOrRecoveryOrWaiverTransaction(loan, txn, null, dto)` (the down-payment service handles **all** repayment-like transactions, not just down payments — its name reflects history).
+
+### 4 — Transaction-processor selection
+
+Inside `LoanDownPaymentHandlerServiceImpl.handleRepaymentOrRecoveryOrWaiverTransaction` (`LoanDownPaymentHandlerServiceImpl.java:82`), once amount/date validations pass and the new transaction is added to the loan (L100), the service decides between two paths:
+
+- **Process-latest fast path** — when the transaction is chronologically latest, no adjusted transaction is being replayed, the loan is not in foreclosure, and `canProcessLatestTransactionOnly` returns true, the service calls `loanTransactionProcessingService.processLatestTransaction(strategyCode, txn, ctx)` (L141).
+- **Full reprocess path** — otherwise, the schedule is regenerated (`regenerateRepaymentScheduleWithInterestRecalculation` for cumulative, `regenerateRepaymentSchedule` for progressive), and every non-reversed transaction is replayed via `reprocessLoanTransactionsService.reprocessTransactions(loan)` (L167).
+
+`LoanTransactionProcessingServiceImpl.processLatestTransaction` (`LoanTransactionProcessingServiceImpl.java:96`) is a tiny piece of indirection over the strategy factory:
+
+```java
+return loanRepaymentScheduleTransactionProcessor.processLatestTransaction(loanTransaction, ctx);
+```
+
+where `loanRepaymentScheduleTransactionProcessor` was selected by `transactionProcessorFactory.determineProcessor(transactionProcessingStrategyCode)` (L129). The strategy code comes from `loan.getTransactionProcessingStrategyCode()`. Common values:
+
+- `mifos-standard-strategy` — penalties → fees → interest → principal, applied per installment in order.
+- `creocore-strategy` — penalties → fees → principal → interest.
+- `early-repayment-strategy` — interest computed against the actual transaction date.
+- `advanced-payment-allocation-strategy` — used by progressive loans; allocation order configured per product on `m_payment_allocation_rule`.
+- `rbi-india-strategy`, `heavensfamily-strategy`, etc.
+
+Each processor walks the open installments in date order, computing how much of the transaction amount maps to each portion. The mutated `LoanTransaction` ends up with `principalPortion`, `interestPortion`, `feeChargesPortion`, `penaltyChargesPortion` fields populated.
+
+### 5 — Schedule and summary
+
+When the fast path runs but later conditions detect under-allocation, `reprocessOnPostConditions` (L150-159) flips the flow to the full reprocess path. The full path:
+
+- regenerates the schedule via `LoanScheduleService`,
+- replays all non-reversed transactions through `ReprocessLoanTransactionsService.reprocessTransactions(loan)` (L167),
+- For interest-bearing loans with interest recalculation, replays accruals via `LoanAccrualsProcessingService.reprocessExistingAccruals` / `processIncomePostingAndAccruals` (back in the outer write service, L1138-1139).
+
+### 6 — Lifecycle transition
+
+`loanLifecycleStateMachine.determineAndTransition(loan, transactionDate)` (L173 of the down-payment service) inspects total outstanding and decides whether to flip the loan to `CLOSED_OBLIGATIONS_MET` (no balance, on time), `OVERPAID` (over-allocation), or keep it `ACTIVE`. Multi-disburse over-credit is handled at L179-194.
+
+### 7 — Persistence
+
+Back in the write service after the domain service returns, the new `LoanTransaction` is saved with `loanAccountService.saveLoanTransactionWithDataIntegrityViolationChecks(newRepaymentTransaction)` (mirroring the pattern at L1107 of `LoanWritePlatformServiceJpaRepositoryImpl`), and the loan aggregate is flushed via `saveAndFlushLoanWithDataIntegrityViolationChecks(loan)`. Schedule rows, charges, summary fields, and the loan itself are updated by JPA's dirty-checking.
+
+### 8 — Journal entries
+
+`journalEntryPoster.postJournalEntriesForLoanTransaction(newRepaymentTransaction, false, false)` calls the accounting bridge. For an accrual-based loan product the GL legs are typically:
+
+- **Dr Fund source** (cash, bank, suspense) — the gross transaction amount
+- **Cr Loan Portfolio** — `principalPortion`
+- **Cr Interest receivable** — `interestPortion`
+- **Cr Fee receivable** — `feeChargesPortion`
+- **Cr Penalty receivable** — `penaltyChargesPortion`
+
+The exact mappings live on the `LoanProduct` accounting configuration and `acc_product_mapping` table; the bridge is `AccountingProcessorForLoan` (`fineract-provider/.../accounting/journalentry/service/AccountingProcessorForLoan.java`).
+
+### 9 — Delinquency tag and business events
+
+`loanAccountDomainService.setLoanDelinquencyTag(loan, transactionDate)` updates `m_loan_arrears_aging` and the delinquency tag derived columns.
+
+Three post-events typically fire:
+
+- `LoanTransactionMadeBusinessEvent` (or a more specific subtype like `LoanRepaymentBusinessEvent`),
+- `LoanBalanceChangedBusinessEvent`,
+- `LoanTransactionGreaterThanInstallmentBusinessEvent` when the transaction amount exceeded the due installment.
+
+Each goes through `BusinessEventNotifierServiceImpl.notifyPostBusinessEvent` (`fineract-core/.../BusinessEventNotifierServiceImpl.java:88`), which queues `ExternalEvent` rows tied to the transaction's commit boundary — see [External event emission flow](/flows/external-event-emission-flow).
+
+### 10 — Result and audit
+
+The `CommandProcessingResult` returned by `makeLoanRepaymentWithChargeRefundChargeType` carries `entityId=loanId`, `subEntityId=loanTransactionId`. `SynchronousCommandProcessingService.executeCommand` writes those into `m_portfolio_command_source.resource_id` / `sub_resource_id` (`SynchronousCommandProcessingService.java:186`), then updates `status` to `PROCESSED` with `result_status_code=200` and serialized result body. Finally `publishHookEvent("LOAN", "REPAYMENT", command, result)` (L217) fans the response out to webhook subscribers.
+
+## Failure cases
+
+- **Closed / overpaid loan** — `validateLoanNotClosedOrOverpaidForTransactions` throws an `InvalidLoanStateTransitionException`; the entire transaction rolls back.
+- **Holiday violation** — `validateRepaymentDateIsOnHoliday` / `validateRepaymentDateIsOnNonWorkingDay` throws unless the product allows it.
+- **Charge constraint** — `loanChargeValidator.validateRepaymentTypeTransactionNotBeforeAChargeRefund` (L1020 of `LoanAccountDomainServiceJpa.makeRepayment`) prevents backdated repayments before an existing charge refund.
+- **DB integrity** — `JpaSystemException` and `DataIntegrityViolationException` are caught in `LoanRepaymentCommandHandler` (L48) and translated into `error.msg.loan.repayment.*` codes by `DataIntegrityErrorHandler`.
+- **Maker-checker** — `CommandSourceService.processCommand` (L143) throws `RollbackTransactionNotApprovedException` after the handler returns when maker-checker is enabled for `REPAYMENT_LOAN`.
+
+## Related pages
+
+- [Command execution flow](/flows/command-execution-flow) — the framework around `LoanRepaymentCommandHandler`.
+- [Loan disburse flow](/flows/loan-disburse-flow) — the inverse operation; same building blocks.
+- `loan/loan-transactions` and `loan/loan-repayment-schedule` — domain model.
+- [COB execution flow](/flows/cob-execution-flow) — how arrears/aging is then recomputed nightly.

@@ -1,0 +1,185 @@
+---
+title: "Release process and Apache distribution"
+sidebarTitle: "Release Process"
+description: "How Apache Fineract is released — Apache release branches, RC voting, signed artifacts, source/binary distributions."
+---
+
+Apache Fineract is released under the Apache Software Foundation's release ritual. Every release is voted on by the project's Project Management Committee, ships as a signed source distribution and a signed binary distribution, and lands in Apache's dist directory and the central Maven repository. The release pipeline is encoded in `buildSrc/src/main/groovy/org.apache.fineract.release.gradle`, applied from the root `build.gradle`.
+
+## The Apache way
+
+```mermaid
+flowchart TB
+    REL_BR[release/X.Y.Z branch] --> RC[Release candidate<br/>X.Y.Z-rcN]
+    RC --> SIGN[GPG-signed<br/>source + binary]
+    SIGN --> STAGE[dist.apache.org/repos/dist/dev/fineract/]
+    STAGE --> VOTE[PMC and community vote<br/>72h minimum, 3 binding +1s]
+    VOTE -->|pass| FINAL[Move to release/]
+    VOTE -->|fail| FIX[Address issues<br/>publish rcN+1]
+    FIX --> RC
+    FINAL --> DH[Docker Hub: apache/fineract:X.Y.Z]
+    FINAL --> CENTRAL[Maven Central<br/>org.apache.fineract:*]
+    FINAL --> ANN[ANNOUNCE@<br/>announce@apache.org]
+```
+
+## Repository markers
+
+Fineract follows the standard ASF naming:
+
+- `LICENSE_SOURCE` and `NOTICE_SOURCE` — applied to the source distribution tarball.
+- `LICENSE_RELEASE` and `NOTICE_RELEASE` — applied to the binary distribution tarball.
+- `APACHE_LICENSETEXT.md` — the canonical Apache 2.0 text.
+- `CHANGELOG.md` — release notes accumulated per release.
+
+The two LICENSE/NOTICE pairs differ because binary distributions must enumerate the licenses of all bundled transitive dependencies, whereas the source distribution only includes Fineract's own code.
+
+## Versioning
+
+Versions follow `MAJOR.MINOR.PATCH` semantic versioning. The `me.qoomon.git-versioning` plugin in the root `build.gradle` derives the version automatically from the Git ref:
+
+```groovy
+gitVersioning.apply {
+    refs {
+        considerTagsOnBranches = true
+        describeTagPattern = '.*(\\d+\\.\\d+\\.\\d+).*'
+        describeTagFirstParent = false
+        branch("release\\/\\d+\\.\\d+\\.\\d+") { ... }
+    }
+}
+```
+
+On a `release/X.Y.Z` branch the project version is the branch's version. On `develop` and feature branches it is `0.0.0-SNAPSHOT`.
+
+## Release branches
+
+The committers cut a release branch by:
+
+```bash
+git checkout -b release/1.11.0 develop
+git push origin release/1.11.0
+```
+
+Only release-blocking fixes are cherry-picked onto a release branch once it has been cut. The branch's CI runs on every push using `.github/workflows/full-build-ci.yml`, which is configured to also trigger on `release/**` branches:
+
+```yaml
+on:
+  push:
+    branches:
+      - develop
+      - 'release/**'
+      - '1.*'
+```
+
+## Release candidates
+
+A release candidate is the actual deliverable that is voted on. To build one:
+
+1. From a clean `release/X.Y.Z` checkout, tag the commit `X.Y.Z-rc1`.
+2. Run the release tasks (provided by the convention script):
+   - source distribution (`apache-fineract-X.Y.Z-src.tar.gz`)
+   - binary distribution (`apache-fineract-X.Y.Z-binary.tar.gz`)
+3. GPG-sign every artifact with the release manager's key (`.asc` files).
+4. Generate SHA-512 checksums (`.sha512` files).
+5. Upload everything to `https://dist.apache.org/repos/dist/dev/fineract/X.Y.Z-rc1/`.
+
+The `org.apache.fineract.release.gradle` convention script provides Gradle tasks for steps 2–4. The upload (step 5) is performed by the release manager via Subversion (the ASF dist area is an SVN repo).
+
+## The vote
+
+The release manager sends an email to `dev@fineract.apache.org` (and the PMC for the binding vote) with subject like:
+
+```
+[VOTE] Release Apache Fineract X.Y.Z (RC1)
+```
+
+The vote runs for at least 72 hours and requires three binding `+1` votes from PMC members with no `-1`. Voters typically:
+
+- Verify the GPG signature with the release manager's published key.
+- Confirm the checksum matches.
+- Build from the source distribution and run the smoke test suite.
+- Check that the LICENSE and NOTICE files are correct.
+- Confirm `RAT` is clean (every file has the Apache header).
+
+The voting thread is archived publicly on `lists.apache.org`.
+
+## After a successful vote
+
+- The release manager moves the artifacts from `dev/` to `release/` in dist.apache.org.
+- The Git tag `X.Y.Z` is created on the release commit (this also satisfies the gitVersioning plugin's pattern for future builds).
+- The `publish-dockerhub.yml` workflow runs on the new tag and pushes the Docker image to `apache/fineract:X.Y.Z`.
+- An `[ANNOUNCE]` email goes to `announce@apache.org` and `dev@fineract.apache.org`.
+- The CHANGELOG.md is updated on `develop` with the entry that was used in the announcement.
+
+## Artifact layout
+
+A successful release produces:
+
+```
+apache-fineract-X.Y.Z-src.tar.gz                source distribution
+apache-fineract-X.Y.Z-src.tar.gz.asc            GPG signature
+apache-fineract-X.Y.Z-src.tar.gz.sha512         checksum
+apache-fineract-X.Y.Z-binary.tar.gz             binary distribution
+apache-fineract-X.Y.Z-binary.tar.gz.asc
+apache-fineract-X.Y.Z-binary.tar.gz.sha512
+```
+
+The source distribution contains the entire Gradle build with no compiled outputs. The binary distribution contains:
+
+- The runnable Fineract jar/war.
+- Every dependency jar.
+- An aggregated LICENSE file enumerating every dependency's license.
+- The NOTICE file derived from `NOTICE_RELEASE`.
+- A `licenses/` directory with full text of any license that is not Apache 2.0.
+
+## Maven Central
+
+`fineractPublishProjects` in the root build lists the modules whose jars get published:
+
+```
+fineract-avro-schemas, fineract-client, fineract-client-feign,
+fineract-core, fineract-security, fineract-cob, fineract-validation,
+fineract-command, fineract-command-jdbc, fineract-command-audit,
+fineract-accounting, fineract-provider,
+fineract-investor, fineract-charge, fineract-rates, fineract-tax,
+fineract-loan-origination, fineract-loan, fineract-savings,
+fineract-report, fineract-mix, fineract-branch, fineract-document,
+fineract-progressive-loan, fineract-progressive-loan-embeddable-schedule-generator,
+fineract-working-capital-loan
+```
+
+These are pushed to OSSRH staging, validated, then released to Maven Central under group id `org.apache.fineract`.
+
+## RAT and license scrubbing
+
+The Apache RAT plugin runs as part of the build (see [Code quality](/build/code-quality)). For a release to ship, RAT must report zero unapproved files. The `LICENSE_SOURCE` and `NOTICE_SOURCE` files are the canonical artifacts that match the source tarball; the convention script asserts they are present and consistent.
+
+## Reproducibility
+
+Apache releases must be reproducible: anyone with the source distribution and a JDK 21 install must be able to compile the same artifacts. Tooling supporting this:
+
+- A pinned Gradle version via the wrapper.
+- The version catalog and `dependencies.gradle` keep dependency resolution deterministic.
+- The `org.cyclonedx.bom` SBOM ships alongside the binary distribution so consumers know exactly what is inside.
+
+## Release manager checklist
+
+| Step | Tooling |
+|---|---|
+| Cut `release/X.Y.Z` branch | git |
+| Verify `./gradlew check` passes | Gradle |
+| Run dependency-check and SBOM | Gradle |
+| Verify swagger-brake against the previous release | Gradle |
+| Build source/binary distributions, sign, sha512 | Gradle + GPG |
+| Stage to dist.apache.org/dev/fineract | SVN |
+| Send `[VOTE]` email | `dev@fineract.apache.org` |
+| Tally votes after 72h | manual |
+| If passed, move to `release/`, tag, push image | SVN + git + GH Actions |
+| Send `[ANNOUNCE]` email | `announce@apache.org` |
+| Update CHANGELOG on `develop` | git |
+
+## See also
+
+- [Build, test and deployment overview](/build/overview)
+- [Docker image](/build/docker-image)
+- [Dependency management](/build/dependency-management)
+- [CI / CD](/build/ci-and-github-actions)

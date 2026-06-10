@@ -1,0 +1,380 @@
+---
+title: "Authentication and tenant resolution flow"
+sidebarTitle: "Auth & Tenant"
+description: "Trace of how Apache Fineract resolves the tenant from the Fineract-Platform-TenantId header, looks up the per-tenant data source, and authenticates the user against m_appuser — covering basic auth, the temporary-password path, and post-auth user checks."
+---
+
+Every API request in Apache Fineract carries two dimensions of identity: **which tenant** the request is for, and **which user** is making it. Both are resolved in the same servlet filter, `TenantAwareBasicAuthenticationFilter`, before Jersey ever sees the request. This page traces both halves end-to-end against the current sources in `fineract-security/` and `fineract-provider/.../core/config/`.
+
+The path covered:
+
+1. The container hands the request to the Spring Security chain.
+2. `TenantAwareBasicAuthenticationFilter` reads `Fineract-Platform-TenantId`, calls `AuthTenantDetailsServiceJdbc` to load the tenant from `fineract_tenants`, pins it on `ThreadLocalContextUtil`, then runs Spring Security's `BasicAuthenticationFilter`.
+3. The authentication manager delegates to `TemporaryPasswordAwareAuthenticationProvider`, which uses `TenantAwareJpaPlatformUserDetailsService` to load the `AppUser` from the **tenant's** `m_appuser` table.
+4. `PlatformUserDetailsChecker` runs as a post-authentication check.
+5. On success, the filter pins business dates and a notification header.
+
+## Files involved
+
+| Role | File |
+| --- | --- |
+| Security config | `fineract-provider/src/main/java/org/apache/fineract/infrastructure/core/config/SecurityConfig.java` |
+| Tenant + auth filter | `fineract-security/src/main/java/org/apache/fineract/infrastructure/security/filter/TenantAwareBasicAuthenticationFilter.java` |
+| Tenant lookup | `fineract-security/src/main/java/org/apache/fineract/infrastructure/security/service/AuthTenantDetailsServiceJdbc.java` |
+| Tenant row mapper | `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/service/tenant/TenantMapper.java` |
+| Business dates | `fineract-core/.../infrastructure/businessdate/service/BusinessDateReadPlatformService.java` |
+| Authentication manager | bean `authenticationManagerBean()` in `SecurityConfig.java:528` |
+| Provider | `fineract-provider/src/main/java/org/apache/fineract/infrastructure/security/service/TemporaryPasswordAwareAuthenticationProvider.java` |
+| User details service | `fineract-security/src/main/java/org/apache/fineract/infrastructure/security/service/TenantAwareJpaPlatformUserDetailsService.java` |
+| Post-auth checker | `fineract-provider/src/main/java/org/apache/fineract/infrastructure/security/service/PlatformUserDetailsChecker.java` |
+| Domain entity | `fineract-core/src/main/java/org/apache/fineract/useradministration/domain/AppUser.java` |
+| Tenant context | `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/service/ThreadLocalContextUtil.java` |
+
+## Where the filter sits
+
+`SecurityConfig.filterChain` (`SecurityConfig.java:122`) configures the security chain for `/api/**`. The tenant filter is the first custom filter added, before Spring Security's `SecurityContextHolderFilter`:
+
+```java
+http.addFilterBefore(tenantAwareBasicAuthenticationFilter(), SecurityContextHolderFilter.class)
+    .addFilterAfter(requestResponseFilter(), ExceptionTranslationFilter.class)
+    .addFilterAfter(correlationHeaderFilter(), RequestResponseFilter.class)
+    .addFilterAfter(fineractInstanceModeApiFilter(), CorrelationHeaderFilter.class);
+```
+*(`SecurityConfig.java:421-424`)*
+
+The filter itself extends Spring Security's `BasicAuthenticationFilter`:
+
+```java
+public TenantAwareBasicAuthenticationFilter(final AuthenticationManager authenticationManager,
+        final AuthenticationEntryPoint authenticationEntryPoint, ...) {
+    super(authenticationManager, authenticationEntryPoint);
+    ...
+}
+```
+*(`TenantAwareBasicAuthenticationFilter.java:80-95`)*
+
+That base class is what parses the `Authorization: Basic ...` header and calls `AuthenticationManager.authenticate(UsernamePasswordAuthenticationToken)`.
+
+## End-to-end sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant Container as Embedded Servlet Container
+    participant Chain as Spring Security FilterChain<br/>SecurityConfig.filterChain L122
+    participant TF as TenantAwareBasicAuthenticationFilter<br/>doFilterInternal L96
+    participant TLC as ThreadLocalContextUtil
+    participant TSvc as AuthTenantDetailsServiceJdbc<br/>loadTenantById L48
+    participant Cache as @Cacheable tenantsById<br/>SecurityConfig cache
+    participant TenantsDB as fineract_tenants (control DB)
+    participant BDSvc as BusinessDateReadPlatformService
+    participant CWS as CacheWritePlatformService
+    participant Config as ConfigurationDomainService
+    participant Super as BasicAuthenticationFilter<br/>(Spring Security)
+    participant AM as AuthenticationManager<br/>ProviderManager
+    participant Prov as TemporaryPasswordAwareAuthenticationProvider<br/>additionalAuthenticationChecks L39
+    participant UDS as TenantAwareJpaPlatformUserDetailsService<br/>loadUserByUsername L44
+    participant UserCache as @Cacheable usersByUsername<br/>(tenant-scoped key)
+    participant UserRepo as PlatformUserRepository<br/>findByUsernameAndDeletedAndEnabled
+    participant TenantDB as Tenant DataSource<br/>m_appuser
+    participant Encoder as DelegatingPasswordEncoder<br/>passwordEncoder() L511
+    participant Checker as PlatformUserDetailsChecker<br/>check L34
+    participant SCH as SecurityContextHolder
+    participant Notif as UserNotificationService
+    participant Down as Downstream filters / Jersey
+
+    Client->>Container: HTTP request to /api/...<br/>Fineract-Platform-TenantId: default<br/>Authorization: Basic base64(mifos:password)
+    Container->>Chain: dispatch
+    Chain->>TF: doFilterInternal(req, res, chain) L96
+    TF->>TLC: ThreadLocalContextUtil.reset() L99
+    alt OPTIONS method
+        TF->>Down: chain.doFilter (CORS preflight) L101-104
+    else other methods
+        TF->>TF: tenantIdentifier = header "Fineract-Platform-TenantId" L108
+        alt blank header
+            TF->>TF: fallback to query param "tenantIdentifier" L111
+        end
+        alt still null
+            TF->>Client: 400 Bad Request<br/>"No tenant identifier found" L116
+        end
+        TF->>TF: isReportRequest = URI contains "report" L126
+        TF->>TSvc: loadTenantById(tenantIdentifier, isReportRequest) L129
+        TSvc->>Cache: lookup tenantsById cache key
+        alt cache miss
+            TSvc->>TenantsDB: SELECT t.* FROM tenants t WHERE t.identifier = ? L51
+            TenantsDB-->>TSvc: row (tenant_server_connections joined)
+            TSvc->>TSvc: TenantMapper builds FineractPlatformTenant with DB connection params
+            TSvc->>Cache: store
+        end
+        TSvc-->>TF: FineractPlatformTenant<br/>(connection params for tenant's app schema)
+        alt unknown tenant
+            TSvc->>TF: throw InvalidTenantIdentifierException L52
+            TF->>Client: 400 Bad Request + WWW-Authenticate Basic L156
+        end
+        TF->>TLC: setTenant(tenant) L130<br/>(makes tenant DataSource resolvable per request)
+        TF->>BDSvc: getBusinessDates() L131
+        BDSvc->>TenantDB: SELECT type, business_date FROM m_business_date
+        BDSvc-->>TF: HashMap&lt;BusinessDateType, LocalDate&gt;
+        TF->>TLC: setBusinessDates(businessDates) L132
+        TF->>TF: authToken = request.getHeader("Authorization") L133
+        opt Basic prefix
+            TF->>TLC: setAuthToken(token without "Basic ") L137
+        end
+        alt first request to JVM
+            TF->>Config: isEhcacheEnabled L144
+            TF->>CWS: switchToCache(SINGLE_NODE or NO_CACHE) L145-148
+        end
+        TF->>Super: super.doFilterInternal(req, res, chain) L153
+        Super->>Super: parse Authorization Basic header → username:password
+        Super->>AM: authenticate(UsernamePasswordAuthenticationToken)
+        AM->>Prov: authenticate(token) (ProviderManager iterates providers)
+        Prov->>UDS: loadUserByUsername(username) L44
+        UDS->>UserCache: lookup<br/>key = tenantId + username + 'ubu' L43
+        alt cache miss
+            UDS->>UserRepo: findByUsernameAndDeletedAndEnabled(username, false, true) L50
+            UserRepo->>TenantDB: SELECT * FROM m_appuser WHERE username=? AND is_deleted=false AND enabled=true
+            TenantDB-->>UserRepo: AppUser row + roles + permissions (eager fetch)
+            UserRepo-->>UDS: AppUser (implements UserDetails)
+            UDS->>UserCache: store
+        end
+        UDS-->>Prov: UserDetails (AppUser)
+        alt user not found
+            UDS->>Prov: throw UsernameNotFoundException L53
+            Prov->>Super: BadCredentialsException
+            Super->>Client: 401 Unauthorized
+        end
+        Prov->>Encoder: passwordEncoder.matches(presented, userDetails.getPassword()) L46
+        alt matches permanent password
+            Encoder-->>Prov: true
+        else doesn't match
+            opt user has valid temporary password
+                Prov->>Prov: appUser.hasValidTemporaryPassword() L51
+                Prov->>Encoder: matches(presented, appUser.getTemporaryPassword())
+                alt matches temp password
+                    Encoder-->>Prov: true (continue)
+                else
+                    Prov->>Super: throw BadCredentialsException L56
+                end
+            end
+        end
+        Prov->>Checker: postAuthenticationChecks.check(userDetails) L34
+        Checker->>Checker: enforce locking / expiry / etc. for AppUser
+        Checker-->>Prov: ok or throw AccountStatusException
+        Prov-->>AM: Authentication populated (principal=AppUser, authorities=roles+perms)
+        AM-->>Super: Authentication
+        Super->>SCH: SecurityContextHolder.getContext().setAuthentication(auth)
+        Super->>TF: chain.doFilter (now authenticated)
+        TF->>TF: onSuccessfulAuthentication(req, res, authResult) L171
+        TF->>Notif: hasUnreadUserNotifications(appUser.getId()) L174
+        Notif-->>TF: boolean
+        TF->>Client: response header X-Notification-Refresh: true/false L175-178
+        TF->>Down: chain.doFilter continues into CorrelationHeaderFilter, InstanceModeFilter, COB, idempotency, Jersey
+    end
+    Note over TF: finally block at L161:<br/>ThreadLocalContextUtil.reset() — tenant cleared before thread returns to pool
+```
+
+## Step-by-step
+
+### 1 — Container hands off to the security chain
+
+When the embedded container hands the request to the Spring Security chain, the very first custom filter to run is `TenantAwareBasicAuthenticationFilter`. It is added *before* Spring's `SecurityContextHolderFilter`, which means the tenant and `ThreadLocalContextUtil` are set up before any other Spring Security infrastructure can run.
+
+### 2 — Header parsing
+
+```java
+String tenantIdentifier = request.getHeader(TENANT_ID_REQUEST_HEADER);
+if (org.apache.commons.lang3.StringUtils.isBlank(tenantIdentifier)) {
+    tenantIdentifier = request.getParameter("tenantIdentifier");
+}
+if (tenantIdentifier == null && EXCEPTION_IF_HEADER_MISSING) {
+    throw new InvalidTenantIdentifierException("No tenant identifier found: Add request header of '"
+            + TENANT_ID_REQUEST_HEADER + "' or add the parameter 'tenantIdentifier' to query string of request URL.");
+}
+```
+*(`TenantAwareBasicAuthenticationFilter.java:108-116`)*
+
+`TENANT_ID_REQUEST_HEADER` is the constant `"Fineract-Platform-TenantId"` (L68). The query-param fallback exists so report links and download URLs work even when an external system cannot set headers.
+
+### 3 — Tenant lookup
+
+```java
+final FineractPlatformTenant tenant = basicAuthTenantDetailsService.loadTenantById(tenantIdentifier, isReportRequest);
+```
+*(`TenantAwareBasicAuthenticationFilter.java:129`)*
+
+`AuthTenantDetailsServiceJdbc.loadTenantById` (`AuthTenantDetailsServiceJdbc.java:48`) runs a SQL query against the **control** database (`fineract_tenants`) using a `JdbcTemplate` bound to the `hikariTenantDataSource`:
+
+```java
+@Cacheable(value = "tenantsById")
+public FineractPlatformTenant loadTenantById(final String tenantIdentifier, final boolean isReport) {
+    try {
+        final TenantMapper rm = new TenantMapper(isReport);
+        final String sql = "select  " + rm.schema() + " where t.identifier = ?";
+        return this.jdbcTemplate.queryForObject(sql, rm, new Object[] { tenantIdentifier });
+    } catch (final EmptyResultDataAccessException e) {
+        throw new InvalidTenantIdentifierException("The tenant identifier: " + tenantIdentifier + " is not valid.", e);
+    }
+}
+```
+
+`TenantMapper.schema()` joins `tenants` with `tenant_server_connections` and the `isReport` flag selects the read-only replica connection columns when true. The returned `FineractPlatformTenant` carries the JDBC URL, username, password, schema name, etc. required to resolve the tenant's app DataSource later in the request.
+
+The `@Cacheable("tenantsById")` annotation means the second request for the same tenant hits the in-memory cache (or single-node ehcache when enabled, per the `cacheWritePlatformService.switchToCache(...)` call at L145-148).
+
+### 4 — Pinning the tenant onto the thread
+
+```java
+ThreadLocalContextUtil.setTenant(tenant);
+HashMap<BusinessDateType, LocalDate> businessDates = businessDateReadPlatformService.getBusinessDates();
+ThreadLocalContextUtil.setBusinessDates(businessDates);
+String authToken = request.getHeader("Authorization");
+if (authToken != null && authToken.startsWith("Basic ")) {
+    ThreadLocalContextUtil.setAuthToken(authToken.replaceFirst("Basic ", ""));
+}
+```
+*(`TenantAwareBasicAuthenticationFilter.java:130-138`)*
+
+Pinning the tenant matters because every later DB access — including the user lookup performed by the authentication provider in the next step — is routed through `RoutingDataSource` (or the equivalent EclipseLink connection resolver) which consults `ThreadLocalContextUtil.getTenant()`. Until L130 runs, JPA writes would land in the wrong schema.
+
+`BusinessDateReadPlatformService.getBusinessDates()` reads `m_business_date` for the tenant's COB and current business dates, both used downstream by validators and the COB filter.
+
+### 5 — Basic auth via Spring Security
+
+`super.doFilterInternal(request, response, filterChain)` (L153) is the inherited `BasicAuthenticationFilter` body. It:
+
+1. parses `Authorization: Basic base64(user:pass)`,
+2. builds a `UsernamePasswordAuthenticationToken`,
+3. calls `AuthenticationManager.authenticate(token)`,
+4. on success populates `SecurityContextHolder` and continues the chain.
+
+The `AuthenticationManager` is a `ProviderManager` registered in `SecurityConfig.authenticationManagerBean()` (L528):
+
+```java
+ProviderManager providerManager = new ProviderManager(authProvider());
+```
+
+with `authProvider()` returning:
+
+```java
+DaoAuthenticationProvider authProvider = new TemporaryPasswordAwareAuthenticationProvider(userDetailsService);
+authProvider.setPasswordEncoder(passwordEncoder());
+authProvider.setPostAuthenticationChecks(platformUserDetailsChecker);
+return authProvider;
+```
+*(`SecurityConfig.java:503-508`)*
+
+The `passwordEncoder()` bean is `PasswordEncoderFactories.createDelegatingPasswordEncoder()` (L511), which supports `{bcrypt}`, `{noop}`, `{pbkdf2}`, etc. prefixes; existing `m_appuser` rows store BCrypt hashes prefixed accordingly.
+
+### 6 — Loading the user from the tenant DB
+
+`TenantAwareJpaPlatformUserDetailsService.loadUserByUsername` (`TenantAwareJpaPlatformUserDetailsService.java:44`):
+
+```java
+@Cacheable(value = "usersByUsername",
+    key = "T(org.apache.fineract.infrastructure.core.service.ThreadLocalContextUtil).getTenant().getTenantIdentifier().concat(#username+'ubu')")
+@Transactional(readOnly = true)
+public UserDetails loadUserByUsername(final String username) ... {
+    final boolean deleted = false;
+    final boolean enabled = true;
+    final PlatformUser appUser = this.platformUserRepository.findByUsernameAndDeletedAndEnabled(username, deleted, enabled);
+    if (appUser == null) {
+        throw new UsernameNotFoundException(username + ": not found");
+    }
+    return appUser;
+}
+```
+
+The `@Cacheable` key is composed from the tenant identifier and the username so two tenants with the same username are cached separately. The `@Transactional(readOnly = true)` is what causes Spring's `EntityManager` to be opened against the tenant's DataSource (pinned in step 4) and what makes the `findBy...` call work transparently against the tenant schema.
+
+The `AppUser` returned implements `UserDetails` and carries its `Role` set; each `Role` carries its `Permission` set. Spring Security exposes those as `GrantedAuthority` strings (`ROLE_X`, `READ_LOAN`, ...).
+
+### 7 — Password match: permanent or temporary
+
+`TemporaryPasswordAwareAuthenticationProvider.additionalAuthenticationChecks` (`TemporaryPasswordAwareAuthenticationProvider.java:39`):
+
+```java
+if (authentication.getCredentials() == null) {
+    throw new BadCredentialsException(...);
+}
+final String presentedPassword = authentication.getCredentials().toString();
+if (getPasswordEncoder().matches(presentedPassword, userDetails.getPassword())) {
+    return;
+}
+if (userDetails instanceof AppUser appUser && appUser.hasValidTemporaryPassword()
+        && getPasswordEncoder().matches(presentedPassword, appUser.getTemporaryPassword())) {
+    return;
+}
+throw new BadCredentialsException(...);
+```
+
+The provider first compares the presented password against the stored permanent hash (`m_appuser.password`). If that fails it falls back to the **non-expired temporary password** (`m_appuser.temporary_password` + an associated expiry column) so an admin-issued reset link works even after the permanent password has been changed.
+
+### 8 — Post-authentication checks
+
+`PlatformUserDetailsChecker.check(UserDetails)` (`PlatformUserDetailsChecker.java:34`) enforces things like account-lock, expiry, password reset required — throwing `AccountStatusException` subtypes that the `BasicAuthenticationEntryPoint` (`SecurityConfig.java:496`) turns into `401`s.
+
+### 9 — Successful authentication
+
+`TenantAwareBasicAuthenticationFilter.onSuccessfulAuthentication(...)` (L171) is overridden:
+
+```java
+@Override
+protected void onSuccessfulAuthentication(HttpServletRequest request, HttpServletResponse response, Authentication authResult)
+        throws IOException {
+    super.onSuccessfulAuthentication(request, response, authResult);
+    AppUser user = (AppUser) authResult.getPrincipal();
+    if (userNotificationService.hasUnreadUserNotifications(user.getId())) {
+        response.addHeader("X-Notification-Refresh", "true");
+    } else {
+        response.addHeader("X-Notification-Refresh", "false");
+    }
+}
+```
+
+This is how the web UI knows it should re-fetch the notification feed after every authenticated request.
+
+### 10 — Thread cleanup
+
+```java
+} finally {
+    ThreadLocalContextUtil.reset();
+    task.stop();
+    final PlatformRequestLog msg = PlatformRequestLog.from(task, request);
+    log.debug("{}", toApiJsonSerializer.serialize(msg));
+}
+```
+*(`TenantAwareBasicAuthenticationFilter.java:161-167`)*
+
+`ThreadLocalContextUtil.reset()` is called **after** the filter chain returns — including the JAX-RS resource. Until that point, every JPA query in the request thread uses the tenant pinned in step 4. The `PlatformRequestLog` is the request-duration log line emitted at `DEBUG` for every request.
+
+## Caching layers
+
+Three caches sit on this path:
+
+- **`tenantsById`** (`AuthTenantDetailsServiceJdbc.loadTenantById`) — keyed by tenant identifier. Per-JVM single-node cache by default; can be swapped to ehcache via `cacheWritePlatformService.switchToCache(SINGLE_NODE)` (`TenantAwareBasicAuthenticationFilter.java:145`).
+- **`usersByUsername`** (`TenantAwareJpaPlatformUserDetailsService.loadUserByUsername`) — keyed by `tenantId + username + 'ubu'`. Invalidated when users are updated.
+- **Roles/permissions** — eagerly loaded inside the `AppUser` from `m_role` and `m_role_permission`; the `AppUser` itself is in the user cache, so role/permission churn requires evicting the user.
+
+## OAuth2 / OIDC variant
+
+When `fineract.security.basicauth.enabled=false` and OAuth2 is enabled, the entire `SecurityConfig` shown above is replaced by a JWT-based chain in `Oauth2SecurityConfig` (search for `@ConditionalOnProperty("fineract.security.oauth.enabled")`). The tenant filter is replaced by `OidcTenantAwareFilter` (`fineract-security/.../OidcTenantAwareFilter.java`) and authentication by `FineractJwtAuthenticationTokenConverter`. The tenant resolution semantics are identical — same `AuthTenantDetailsServiceJdbc`, same `ThreadLocalContextUtil` pin — but the username is decoded from the JWT instead of from a Basic header.
+
+## Error responses
+
+| Condition | Class | HTTP status |
+| --- | --- | --- |
+| Missing tenant header | `InvalidTenantIdentifierException` thrown at L116, caught at L155 | 400 + `WWW-Authenticate: Basic realm="Fineract Platform API"` |
+| Unknown tenant | `InvalidTenantIdentifierException` from `loadTenantById` L52 | 400 |
+| Missing / malformed `Authorization` header | base `BasicAuthenticationFilter` calls `entryPoint.commence` → `BasicAuthenticationEntryPoint` | 401 |
+| Unknown username | `UsernameNotFoundException` → translated to `BadCredentialsException` by provider | 401 |
+| Wrong password | `BadCredentialsException` from `TemporaryPasswordAwareAuthenticationProvider` L56 | 401 |
+| Disabled / locked user | `PlatformUserDetailsChecker.check` throws `AccountStatusException` subtype | 401 |
+| Authorization (not authentication) failure | `SecurityConfig` authorization manager returns deny | 403 |
+
+## Related pages
+
+- [Request lifecycle](/flows/request-lifecycle) — where this filter sits in the bigger filter chain.
+- `security/basic-auth`, `security/tenant-auth-resolution`, `security/filters` — narrative docs.
+- `runtime/multi-tenancy` — how `FineractPlatformTenant` ends up driving the per-request `DataSource`.
+- `security/oauth2-and-oidc` — the JWT-based alternative.

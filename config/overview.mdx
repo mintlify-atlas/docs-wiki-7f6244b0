@@ -1,0 +1,162 @@
+---
+title: "Configuration overview"
+sidebarTitle: "Overview"
+description: "Tour of Apache Fineract configuration — application.properties, FineractProperties, env vars, JVM args, profiles, runtime toggles."
+---
+
+Apache Fineract is a Spring Boot 3 application configured through layered mechanisms: a large `application.properties` file in `fineract-provider`, a typed `FineractProperties` class in `fineract-core`, environment variables consumed via `${...}` placeholders, Spring profiles, JVM system properties, and a handful of `Condition` classes that gate beans at startup. Understanding how these layers compose is the first step in deploying Fineract reliably across local, CI, and production environments.
+
+## The configuration layers
+
+Fineract follows the standard Spring Boot property hierarchy with a heavy reliance on environment-variable substitution. From lowest to highest precedence the layers are:
+
+1. Built-in defaults coded inside Spring Boot starters.
+2. Defaults baked into `fineract-provider/src/main/resources/application.properties`.
+3. Profile-specific files (`application-{profile}.properties`) when active.
+4. Environment variables matching the `FINERACT_*` and `SPRING_*` naming used in placeholders.
+5. JVM system properties passed with `-D...`.
+6. Command-line arguments to the executable jar/war.
+
+Most properties take the form `key=${FINERACT_KEY:default-value}`, meaning the operator only needs to set environment variables to override; the property file documents the canonical mapping.
+
+## Configuration map
+
+```mermaid
+flowchart LR
+    ENV[Environment variables<br/>FINERACT_*, SPRING_*] --> PROPS[application.properties<br/>placeholder substitution]
+    JVM[JVM -D flags] --> PROPS
+    PROFILES[Active profiles<br/>application-{profile}.properties] --> PROPS
+    PROPS --> BIND[Spring @ConfigurationProperties binding]
+    BIND --> FP[FineractProperties<br/>typed tree]
+    FP --> BEANS[Beans, factories,<br/>conditionals]
+    BEANS --> RUNTIME[Running app]
+    CONDITIONS[Condition classes<br/>BatchManager, COB, etc.] --> BEANS
+```
+
+## What lives where
+
+| Concern | Location | Page |
+|---|---|---|
+| Server, datasource, JPA, Liquibase, Quartz defaults | `fineract-provider/src/main/resources/application.properties` | [application.properties](/config/application-properties) |
+| Typed binding of the `fineract.*` subtree | `fineract-core/.../config/FineractProperties.java` | [FineractProperties](/config/fineract-properties) |
+| Operator-facing knobs | env var names referenced by `${...}` placeholders | [Environment variables](/config/environment-variables) |
+| Conditional features and instance modes | `infrastructure/core/condition/*Condition.java` | [Feature flags](/config/feature-flags-and-modes) |
+| Authentication, OAuth2, OIDC, 2FA, CORS | `fineract.security.*` + `spring.security.*` | [Security properties](/config/security-properties) |
+| Tenant store, default tenant, Liquibase | `fineract.tenant.*`, `spring.datasource.*`, `spring.liquibase.*` | [Database properties](/config/database-properties) |
+
+## The `fineract.*` property namespace
+
+All Fineract-specific configuration uses the `fineract` prefix. The top-level `FineractProperties` class declares typed subtrees, including:
+
+- `fineract.node-id` — node identifier for clustered deployments.
+- `fineract.tenant.*` — connection settings for the default demo tenant and the read-only replica.
+- `fineract.mode.*` — instance-mode toggles for read, write, batch-manager and batch-worker.
+- `fineract.security.*` — basic auth, OAuth2, OIDC, 2FA, HSTS, CORS.
+- `fineract.events.external.*` — external event publisher (JMS, Kafka).
+- `fineract.content.*` — document storage (filesystem, S3).
+- `fineract.job.*` — Quartz job toggles and tunables.
+- `fineract.partitioned-job.*` — Spring Batch partitioning for LOAN_COB.
+- `fineract.remote-job-message-handler.*` — JMS/Kafka transport for remote job triggering.
+- `fineract.loan.transactionprocessor.*` — which loan repayment strategies are exposed.
+- `fineract.sql-validation.patterns[*]` — regex patterns used by the SQL guard.
+
+The full tree is documented in [FineractProperties](/config/fineract-properties).
+
+## Spring-managed properties
+
+In addition to `fineract.*`, Fineract leans on standard Spring Boot keys:
+
+- `spring.datasource.*` — used for the tenants-store datasource (the catalog of tenants).
+- `spring.liquibase.*` — schema migration controls.
+- `spring.servlet.multipart.*` — upload size limits.
+- `spring.security.oauth2.resourceserver.jwt.*` — JWT issuer/JWK configuration when OIDC federation is enabled.
+- `spring.profiles.active` — activates profile-specific overrides.
+
+These are documented inline in `application.properties` and surfaced again in each thematic page below.
+
+## Profiles in use
+
+Fineract does not ship a long list of named profiles, but the codebase recognizes:
+
+- The default profile, used by `bootRun` and the WAR/jar.
+- Test profiles set by integration test modules (e.g. for in-memory configuration or Liquibase-only mode).
+- A "liquibase-only" code path gated by `FineractLiquibaseOnlyApplicationCondition`, which can be enabled to run a container whose only job is to apply schema migrations and exit.
+
+You select profiles via `SPRING_PROFILES_ACTIVE` or `--spring.profiles.active`.
+
+## Conditional beans
+
+Many subsystems are wired through Spring `@Conditional` annotations bound to classes in `org.apache.fineract.infrastructure.core.condition`:
+
+- `EnableFineractEventsCondition` — controls the external-events publisher.
+- `EnableFineractEventListenerCondition` — gates the listener side.
+- `FineractExternalEventConfigCondition` — validates the event publisher config combination.
+- `FineractLiquibaseOnlyApplicationCondition` — short-circuits the app into migrate-and-exit.
+- `FineractModeValidationCondition` — fails fast on contradictory `fineract.mode.*` combinations.
+- `FineractPartitionJobConfigValidationCondition` — checks partitioned-job pool/chunk settings.
+- `FineractRemoteJobMessageHandlerCondition` — selects between JMS, Kafka or in-process Spring events.
+- `FineractWebApplicationCondition` — distinguishes web vs non-web runs.
+- `ProfileCondition` — generic profile check used in a few places.
+
+See [Feature flags and instance modes](/config/feature-flags-and-modes) for details.
+
+## Tenant configuration
+
+Fineract is multi-tenant. The properties divide into:
+
+- **Tenants-store**: a single catalog database (configured via `spring.datasource.*`) listing every tenant and how to reach it.
+- **Default tenant**: bootstrap settings for the demo tenant under `fineract.tenant.*` — host, port, credentials, identifier, name, master password, encryption algorithm, optional read-only replica.
+
+When the application boots, the tenants-store is consulted to discover per-tenant datasources. Each tenant has its own schema and its own Liquibase changelog state. See [Database properties](/config/database-properties).
+
+## JVM and runtime arguments
+
+In production, operators typically pass JVM flags through the container or systemd unit:
+
+- `-Xms` / `-Xmx` — heap sizes.
+- `-Duser.timezone=UTC` — Fineract uses UTC internally; this avoids local-time drift.
+- `-Dfile.encoding=UTF-8` — required for correct handling of localized data.
+- `-Djava.security.egd=file:/dev/./urandom` — speeds up TLS startup on Linux.
+- `-Duser.home=/tmp` — used by the official Jib image so library caches land in writable space.
+
+These exact flags are baked into the container's `jib { container { args = [...] } }` block in `fineract-provider/build.gradle`.
+
+## Where to go next
+
+<CardGroup>
+  <Card title="application.properties" href="/config/application-properties">
+    The big property file: every key, every default.
+  </Card>
+  <Card title="FineractProperties" href="/config/fineract-properties">
+    The typed binding class and its sub-objects.
+  </Card>
+  <Card title="Environment variables" href="/config/environment-variables">
+    All FINERACT_* and SPRING_* variables you can set.
+  </Card>
+  <Card title="Feature flags" href="/config/feature-flags-and-modes">
+    Conditional beans and instance-mode toggles.
+  </Card>
+  <Card title="Security" href="/config/security-properties">
+    Basic, OAuth2, OIDC federation, 2FA, CORS, HSTS.
+  </Card>
+  <Card title="Database & Liquibase" href="/config/database-properties">
+    Tenants-store, default tenant, schema migrations.
+  </Card>
+</CardGroup>
+
+## A worked example
+
+Booting Fineract against a PostgreSQL instance on `db.internal:5432` with OAuth2 enabled looks like this:
+
+```bash
+export FINERACT_DEFAULT_TENANTDB_HOSTNAME=db.internal
+export FINERACT_DEFAULT_TENANTDB_PORT=5432
+export FINERACT_DEFAULT_TENANTDB_UID=fineract
+export FINERACT_DEFAULT_TENANTDB_PWD='change-me'
+export FINERACT_SECURITY_BASICAUTH_ENABLED=false
+export FINERACT_SECURITY_OAUTH_ENABLED=true
+export SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI=https://idp.example.com/realms/fineract
+java -Duser.timezone=UTC -jar fineract-provider.jar
+```
+
+Every variable above ultimately resolves into a `fineract.*` or `spring.*` property through the placeholder syntax in `application.properties`, then binds into `FineractProperties` or a Spring Boot autoconfiguration class.

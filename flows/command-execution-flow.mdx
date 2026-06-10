@@ -1,0 +1,306 @@
+---
+title: "Command execution flow: from API to handler"
+sidebarTitle: "Command Execution"
+description: "How a Apache Fineract write request becomes a CommandSource row, gets dispatched to its @CommandType handler, and is recorded with status and result — including idempotency, maker-checker, hook publication, and retry."
+---
+
+Apache Fineract's write path is built around a single abstraction: every non-read API request becomes a **command** that flows through one dispatcher, persists one `m_portfolio_command_source` row, and ends up at one handler bean selected by an `@CommandType(entity, action)` annotation. This page is an end-to-end trace of that pipeline against the current sources in `fineract-core/`.
+
+The flow you will follow:
+
+1. A JAX-RS resource builds a `CommandWrapper` via `CommandWrapperBuilder` and calls `PortfolioCommandSourceWritePlatformServiceImpl.logCommandSource`.
+2. `SynchronousCommandProcessingService.executeCommand` resolves the idempotency key, persists an initial `CommandSource`, looks up the handler from `CommandHandlerProvider`, and runs it inside a transaction.
+3. `CommandSourceService.processCommand` applies maker-checker, updates audit columns, and saves the final result.
+4. The serialized result is returned to the resource and a hook event is published.
+
+Files in scope:
+
+- `fineract-core/src/main/java/org/apache/fineract/commands/service/PortfolioCommandSourceWritePlatformServiceImpl.java`
+- `fineract-core/src/main/java/org/apache/fineract/commands/service/SynchronousCommandProcessingService.java`
+- `fineract-core/src/main/java/org/apache/fineract/commands/service/CommandSourceService.java`
+- `fineract-core/src/main/java/org/apache/fineract/commands/provider/CommandHandlerProvider.java`
+- `fineract-core/src/main/java/org/apache/fineract/commands/domain/CommandSource.java`
+- `fineract-core/src/main/java/org/apache/fineract/commands/service/CommandWrapperBuilder.java`
+- `fineract-core/src/main/java/org/apache/fineract/commands/annotation/CommandType.java`
+
+## Anatomy of a command
+
+A command in Apache Fineract is made of three plain-Java objects:
+
+| Object | Purpose | Key call sites |
+| --- | --- | --- |
+| `CommandWrapper` | The "request" — verbs and ids, no body. Built by `CommandWrapperBuilder`. | `loanRepaymentTransaction(loanId)` — `CommandWrapperBuilder.java:1208`; `disburseLoanApplication(loanId)` — `CommandWrapperBuilder.java:1541` |
+| `JsonCommand` | The body, parsed once via `FromJsonHelper`. | `PortfolioCommandSourceWritePlatformServiceImpl.java:73` |
+| `CommandSource` | The persisted audit row in `m_portfolio_command_source`. | `CommandSourceService.saveInitialNewTransaction` / `saveResultInTransaction` |
+
+Handlers are Spring beans annotated `@Service @CommandType(entity = "...", action = "...")` and implement `NewCommandSourceHandler#processCommand(JsonCommand)`. Two examples used throughout this site:
+
+- `LoanRepaymentCommandHandler` — `@CommandType(entity = "LOAN", action = "REPAYMENT")` (`fineract-loan/src/main/java/org/apache/fineract/portfolio/loanaccount/handler/LoanRepaymentCommandHandler.java:36`)
+- `DisburseLoanCommandHandler` — `@CommandType(entity = "LOAN", action = "DISBURSE")` (`fineract-loan/src/main/java/org/apache/fineract/portfolio/loanaccount/handler/DisburseLoanCommandHandler.java:35`)
+- `PostInterestSavingsAccountCommandHandler` — `@CommandType(entity = "SAVINGSACCOUNT", action = "POSTINTEREST")` (`fineract-provider/src/main/java/org/apache/fineract/portfolio/savings/handler/PostInterestSavingsAccountCommandHandler.java:30`)
+
+## Handler registry
+
+`CommandHandlerProvider` (`fineract-core/.../commands/provider/CommandHandlerProvider.java`) implements `InitializingBean` and `ApplicationContextAware`. At startup it scans every bean carrying `@CommandType` and registers it under `entity + "|" + action`:
+
+```java
+final String[] commandHandlerBeans = applicationContext.getBeanNamesForAnnotation(CommandType.class);
+for (final String commandHandlerName : commandHandlerBeans) {
+    final CommandType commandType = applicationContext.findAnnotationOnBean(commandHandlerName, CommandType.class);
+    registeredHandlers.put(commandType.entity() + "|" + commandType.action(), commandHandlerName);
+}
+```
+*(`CommandHandlerProvider.java:58-73`)*
+
+`getHandler(entity, action)` (L88) returns the bean for that key, or throws `UnsupportedCommandException` if no match exists. That lookup is the only piece of dispatch logic in the whole pipeline; everything else is bookkeeping.
+
+## End-to-end sequence
+
+The diagram traces a representative `POST /api/v1/loans/123/transactions?command=repayment` — but the same path runs for any command-style API. Citations to source files are inline.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Resource as JAX-RS Resource<br/>LoanTransactionsApiResource.executeTransaction L550
+    participant Builder as CommandWrapperBuilder<br/>loanRepaymentTransaction L1208
+    participant Portfolio as PortfolioCommandSourceWritePlatformServiceImpl<br/>logCommandSource L57
+    participant SecCtx as PlatformSecurityContext
+    participant From as FromJsonHelper
+    participant Sync as SynchronousCommandProcessingService<br/>executeCommand L91
+    participant Retry as Resilience4j Retry<br/>retryConfigurationAssembler L86
+    participant IdKey as IdempotencyKeyResolver
+    participant CSS as CommandSourceService
+    participant Repo as CommandSourceRepository
+    participant DB as m_portfolio_command_source
+    participant Provider as CommandHandlerProvider<br/>getHandler L88
+    participant Handler as NewCommandSourceHandler<br/>@CommandType bean
+    participant Domain as Domain Write Service
+    participant Config as ConfigurationDomainService<br/>isMakerCheckerEnabledForTask
+    participant Ser as ToApiJsonSerializer<br/>serializeResult
+    participant TxSync as TransactionSynchronizationManager
+    participant Hook as Hook / Webhook publisher
+
+    Resource->>Builder: new CommandWrapperBuilder().withJson(body)
+    Builder->>Builder: loanRepaymentTransaction(123) L1208<br/>actionName=REPAYMENT, entityName=LOAN
+    Resource->>Portfolio: logCommandSource(commandRequest) L611
+    Portfolio->>SecCtx: authenticatedUser(wrapper) L62
+    SecCtx-->>Portfolio: AppUser
+    Portfolio->>SecCtx: validateHasPermissionTo(taskPermissionName) L69
+    Portfolio->>From: parse(wrapper.getJson()) L73
+    From-->>Portfolio: JsonElement
+    Portfolio->>Portfolio: JsonCommand.from(json, parsed, ...) L74
+    Portfolio->>Sync: processAndLogCommandService.executeCommand(wrapper, command, false) L77
+    Sync->>Retry: retryWrapper(supplier) L86
+    Retry->>Sync: executeSupplier(supplier)
+    Sync->>Sync: setIdempotencyKeyStoreFlag(false) L93
+    Sync->>Sync: commandId = fineractRequestContextHolder.getAttribute(COMMAND_SOURCE_ID) L95
+    alt fresh request (no retry, no commandId)
+        Sync->>IdKey: idempotencyKeyResolver.resolve(wrapper) L107
+        IdKey-->>Sync: idempotencyKey (header or generated)
+    else action on existing command
+        Sync->>CSS: getCommandSource(commandId) L102-104
+        CSS-->>Sync: CommandSource (idempotencyKey preserved)
+    end
+    Sync->>CSS: findCommandSource(wrapper, idempotencyKey) L222
+    CSS->>Repo: findByActionNameAndEntityNameAndIdempotencyKey
+    Repo-->>CSS: maybe existing CommandSource
+    alt status = PROCESSED
+        CSS-->>Sync: PROCESSED row
+        Sync->>Sync: throw IdempotentCommandProcessSucceedException L228
+    else status = UNDER_PROCESSING and previously timed out
+        Sync->>Sync: throw IdempotentCommandProcessUnderProcessingException L226
+    else status = ERROR and not retrying
+        Sync->>Sync: throw IdempotentCommandProcessFailedException L230
+    else no row found
+        Sync->>SecCtx: authenticatedUser(wrapper) L116
+        Sync->>CSS: saveInitialNewTransaction(wrapper, command, user, key) L121
+        CSS->>CSS: build CommandSource (status=UNDER_PROCESSING)
+        CSS->>Repo: saveAndFlush(commandSource)
+        Repo->>DB: INSERT m_portfolio_command_source(<br/>action_name, entity_name, command_as_json,<br/>idempotency_key, maker_id, made_on_date,<br/>status=UNDER_PROCESSING)
+        CSS-->>Sync: managed CommandSource id
+        Sync->>Sync: storeCommandIdInContext(commandSource) L132
+    end
+    Sync->>Sync: setIdempotencyKeyStoreFlag(true) L134
+    Sync->>Provider: findCommandHandler(wrapper) L138
+    Provider->>Provider: registeredHandlers["LOAN|REPAYMENT"] L88
+    Provider-->>Sync: handler bean
+    Sync->>CSS: processCommand(handler, command, source, user, false) L138
+    CSS->>Handler: handler.processCommand(command) L145
+    Handler->>Domain: writePlatformService.makeXxx(...) (e.g. makeLoanRepayment L44)
+    Domain->>Domain: load aggregate, mutate, persist, post journal entries
+    Domain-->>Handler: CommandProcessingResult
+    Handler-->>CSS: result
+    CSS->>Config: isMakerCheckerEnabledForTask(permission) L148
+    Config-->>CSS: boolean
+    alt maker-checker disabled or already approved
+        CSS-->>Sync: result
+    else maker-checker required and not pre-approved
+        CSS->>CSS: commandSource.markAsAwaitingApproval() L157
+        CSS->>Sync: throw RollbackTransactionNotApprovedException L158
+        Sync->>CSS: saveResultNewTransaction (in catch block) L164
+        Sync->>Hook: publishHookErrorEvent L168
+        Note over Sync,DB: thrown exception rolls back the @Transactional boundary;<br/>only the awaiting-approval row survives, written in a NEW transaction
+    end
+    Sync->>Sync: update CommandSource (success path) L183-191
+    Sync->>Sync: commandSource.setResultStatusCode(200) L186
+    Sync->>Sync: commandSource.updateForAudit(result) L186
+    Sync->>Ser: serializeResult(result) L187
+    Ser-->>Sync: JSON of result
+    Sync->>Sync: commandSource.setStatus(PROCESSED) L188
+    Sync->>CSS: saveResultInTransaction(currentSource) L190
+    CSS->>Repo: saveAndFlush(commandSource)
+    Repo->>DB: UPDATE m_portfolio_command_source SET status=PROCESSED,<br/>result_status_code=200, result=JSON, resource_id=...
+    Sync->>Sync: result.setRollbackTransaction(null) L202
+    alt enclosing batch transaction active
+        Sync->>TxSync: registerSynchronization(afterCommit publishHookEvent) L208
+    else simple request
+        Sync->>Hook: publishHookEvent(entity, action, command, result) L217
+    end
+    Sync-->>Portfolio: CommandProcessingResult
+    Portfolio-->>Resource: result
+    Resource->>Ser: toApiJsonSerializer.serialize(result) L612
+    Ser-->>Resource: JSON body
+    Resource-->>Resource: return JSON to Jersey
+```
+
+## Step-by-step
+
+### Build the wrapper
+
+`CommandWrapperBuilder` is a fluent builder that sets `actionName`, `entityName`, `entityId`, plus contextual ids (`loanId`, `clientId`, `savingsId`, ...) and an `href` template used for audit. Every API operation in the codebase has a matching builder method — `loanRepaymentTransaction(loanId)` (L1208), `disburseLoanApplication(loanId)` (L1541), `chargeOff(loanId)`, `createClient()`, and so on.
+
+The same builder is invoked when a checker approves a stored row: `PortfolioCommandSourceWritePlatformServiceImpl.approveEntry` (L86) calls `CommandWrapper.fromExistingCommand(makerCheckerId, ...)` to rebuild the wrapper from the persisted `CommandSource` columns, then drives the same `SynchronousCommandProcessingService.executeCommand` with `isApprovedByChecker = true`.
+
+### Permission and JSON parse
+
+`PortfolioCommandSourceWritePlatformServiceImpl.logCommandSource` (`PortfolioCommandSourceWritePlatformServiceImpl.java:57`) is the choke point between Jersey and the dispatcher. It does two things before delegating:
+
+1. **Permission check** — `context.authenticatedUser(wrapper).validateHasPermissionTo(wrapper.getTaskPermissionName())` (L69). The task permission is derived from `entityName + actionName` (e.g. `REPAYMENT_LOAN`).
+2. **Parse body once** — `fromApiJsonHelper.parse(json)` produces a `JsonElement` which is wrapped in `JsonCommand.from(...)` (L73-75). The `JsonCommand` is the only object handed to the handler; resources never see Jersey's raw stream again.
+
+### Synchronous processing wrapper
+
+`SynchronousCommandProcessingService.executeCommand` (`SynchronousCommandProcessingService.java:91`) is the heart of the pipeline. The implementation is wrapped in `retryWrapper` (L86):
+
+```java
+private CommandProcessingResult retryWrapper(Supplier<CommandProcessingResult> supplier) {
+    if (!BatchRequestContextHolder.isEnclosingTransaction()) {
+        return retryConfigurationAssembler.getRetryConfigurationForExecuteCommand().executeSupplier(supplier);
+    }
+    return supplier.get();
+}
+```
+
+When the call is part of a Batch API enclosing transaction, retry is disabled to avoid losing rollback semantics; otherwise the configured Resilience4j retry policy is applied to the whole dispatch.
+
+### Idempotency key resolution
+
+`IdempotencyKeyResolver` reads the `Idempotency-Key` request header if present, otherwise generates a deterministic key from the wrapper. The resolved key is checked against `m_portfolio_command_source` by `CommandSourceService.findCommandSource(wrapper, idempotencyKey)` (`SynchronousCommandProcessingService.java:222`). The matched row drives the branching in `exceptionWhenTheRequestAlreadyProcessed`:
+
+- `PROCESSED` — replay: throw `IdempotentCommandProcessSucceedException` carrying the stored row, which the `IdempotencyStoreFilter` and exception mapper translate back into the original response body.
+- `UNDER_PROCESSING` — the previous attempt timed out: throw `IdempotentCommandProcessUnderProcessingException` so the client retries later.
+- `ERROR` — throw `IdempotentCommandProcessFailedException` unless this call is itself a retry, in which case execution proceeds and overwrites the failed row.
+
+### Initial CommandSource persistence
+
+If no idempotent match exists, `CommandSourceService.saveInitialNewTransaction(wrapper, command, user, idempotencyKey)` writes a row with `status = UNDER_PROCESSING` and all the classification columns populated (`action_name`, `entity_name`, `loan_id`, ...). The save runs in its own transaction so the row is visible even if the handler later rolls back. The id of that row is pinned onto the request context (`SynchronousCommandProcessingService.storeCommandIdInContext`, L222–229) so the `IdempotencyStoreFilter` can use it on success.
+
+### Handler lookup and invocation
+
+`findCommandHandler(wrapper)` calls `CommandHandlerProvider.getHandler(entity, action)` (`CommandHandlerProvider.java:88`). The bean returned implements `NewCommandSourceHandler`:
+
+```java
+@Service
+@RequiredArgsConstructor
+@CommandType(entity = "LOAN", action = "REPAYMENT")
+public class LoanRepaymentCommandHandler implements NewCommandSourceHandler {
+    private final LoanWritePlatformService writePlatformService;
+    private final DataIntegrityErrorHandler dataIntegrityErrorHandler;
+
+    @Transactional
+    @Override
+    public CommandProcessingResult processCommand(final JsonCommand command) {
+        try {
+            boolean isRecoveryRepayment = false;
+            return this.writePlatformService.makeLoanRepayment(LoanTransactionType.REPAYMENT, command.getLoanId(), command,
+                    isRecoveryRepayment);
+        } catch (final JpaSystemException | DataIntegrityViolationException dve) {
+            dataIntegrityErrorHandler.handleDataIntegrityIssues(command, dve.getMostSpecificCause(), dve, "loan.repayment", "Repayment");
+            return CommandProcessingResult.empty();
+        }
+    }
+}
+```
+*(`fineract-loan/.../handler/LoanRepaymentCommandHandler.java:33-51`)*
+
+The handler is invoked through `CommandSourceService.processCommand` (`CommandSourceService.java:143-162`) which wraps the call in a `@Transactional` boundary and applies maker-checker policy after the handler returns.
+
+### Maker-checker decision
+
+`CommandSourceService.processCommand` (`CommandSourceService.java:143`):
+
+```java
+final CommandProcessingResult result = handler.processCommand(command);
+String permission = commandSource.getPermissionCode();
+boolean isMakerChecker = configurationDomainService.isMakerCheckerEnabledForTask(permission);
+if (isMakerChecker || result.isRollbackTransaction()) {
+    if (isApprovedByChecker || user.isCheckerSuperUser()) {
+        commandSource.markAsChecked(user);
+    } else {
+        ...
+        commandSource.markAsAwaitingApproval();
+        throw new RollbackTransactionNotApprovedException(commandSource.getId(), commandSource.getResourceId());
+    }
+}
+```
+
+This is what turns a successful handler return into a `RollbackTransactionNotApprovedException` when the task is configured for the 4-eyes flow — see the dedicated [Maker-checker flow](/flows/maker-checker-flow) page for the full sequence.
+
+### Result persistence and retry
+
+Back in `SynchronousCommandProcessingService.executeCommand` (L172-200), the result update is wrapped in a second Resilience4j retry (`getRetryConfigurationForCommandResultPersistence`) because `m_portfolio_command_source` updates conflict-prone with concurrent maker-checker UI reads. On each attempt past the first, the `CommandSource` is re-fetched to avoid an optimistic-lock race:
+
+```java
+attemptNumber.getAndIncrement();
+if (attemptNumber.get() > 1 && commandSource.getId() != null) {
+    currentSource = commandSourceService.getCommandSource(finalCommandSource.getId());
+}
+currentSource.setResultStatusCode(SC_OK);
+currentSource.updateForAudit(result);
+currentSource.setResult(toApiResultJsonSerializer.serializeResult(result));
+currentSource.setStatus(PROCESSED);
+return commandSourceService.saveResultInTransaction(currentSource);
+```
+
+If all retries fail, a `CommandResultPersistenceException` is raised (L197). The row is left in `UNDER_PROCESSING`; reconciliation jobs handle that case.
+
+### Hook publication
+
+The final step is `publishHookEvent(entity, action, command, result)` (L211-218). When the call is inside an enclosing batch transaction, publication is deferred via `TransactionSynchronizationManager.registerSynchronization` (`SynchronousCommandProcessingService.java:208-214`) so webhooks only fire after the outer transaction commits — preventing notifications for commands that were rolled back by a sibling failure.
+
+### Error path
+
+If the handler throws, the `catch (Throwable t)` at L142 of `SynchronousCommandProcessingService` maps the exception via `ErrorHandler.getMappable`, copies the status code and message into the `CommandSource`, flips its status to `ERROR`, persists it in a **new** transaction (the current one is already rollback-only), publishes a hook *error* event, and rethrows:
+
+```java
+commandSource.setResultStatusCode(statusCode);
+commandSource.setResult(errorInfo.getMessage());
+if (statusCode != SC_OK) {
+    commandSource.setStatus(ERROR);
+}
+if (!isEnclosingTransaction) {
+    commandSourceService.saveResultNewTransaction(commandSource);
+}
+publishHookErrorEvent(wrapper, command, errorInfo);
+throw mappable;
+```
+*(L154-170)*
+
+That guarantee — the audit row survives even when the business transaction does not — is why the `m_portfolio_command_source` table is the canonical "what did this user try?" log for Apache Fineract.
+
+## Related pages
+
+- [Request lifecycle](/flows/request-lifecycle) — what runs before `logCommandSource` is called.
+- [Maker-checker flow](/flows/maker-checker-flow) — the 4-eyes branch above.
+- [Batch API flow](/flows/batch-api-flow) — how composed requests reuse this same dispatcher.
+- [Loan disburse flow](/flows/loan-disburse-flow) and [Loan repayment flow](/flows/loan-repayment-flow) — concrete handler examples.

@@ -1,0 +1,254 @@
+---
+title: "Apache Fineract domain glossary and acronyms"
+sidebarTitle: "Glossary"
+description: "Alphabetized glossary of Fineract terms, acronyms, and concepts with source file where each is implemented."
+---
+
+Apache Fineract carries a lot of vocabulary — some inherited from its Mifos roots, some specific to microfinance regulation, and some unique to its command-bus architecture. This page is a single alphabetized lookup table for the terms you will encounter when reading code, reviewing PRs, or consuming the REST API. Each row points at the source file where the term is defined or first used so you can jump straight from a word to its implementation.
+
+Use it alongside [Architecture](/overview/architecture), [Module graph](/overview/module-graph), and [Runtime model](/overview/runtime-model). Where a term spans multiple files, the most representative one is cited.
+
+## How to read the table
+
+| Column | What it shows |
+|--------|---------------|
+| **Term** | The word, acronym, or class name as it appears in code, the docs, or the UI. |
+| **Meaning** | A one-or-two-sentence definition. |
+| **Source file** | A representative path inside the Fineract repo. Paths are relative to the repository root. |
+
+<Note>
+Acronyms are alphabetized by their letters (so "2FA" comes first), and class-style terms are alphabetized by their first significant capital letter.
+</Note>
+
+## Glossary
+
+| Term | Meaning | Source file |
+|------|---------|-------------|
+| 2FA | Two-factor authentication, optional OTP-based second step layered on top of basic auth. | `twofactor-tests/` (integration suite); filter in `fineract-security` |
+| AccountingBridge | Translation layer that converts loan/savings transactions into journal entries against GL accounts. | `fineract-accounting/src/main/java/org/apache/fineract/accounting/journalentry/service/AccountingProcessorHelper.java` |
+| Accrual | Periodic recognition of interest, fees, or penalties on a loan even before they are paid. | `fineract-accounting/.../journalentry/service/AccrualBasedAccountingProcessorForLoan.java` |
+| AppUser | The platform-level user account that authenticates against the API. | `fineract-core/src/main/java/org/apache/fineract/useradministration/domain/AppUser.java` |
+| BatchApi | A single endpoint (`/batches`) that accepts an array of sub-requests and executes them in order, optionally inside one transaction. | `fineract-provider/src/main/java/org/apache/fineract/batch/api/BatchApiResource.java` |
+| BCrypt | Password hashing algorithm used by `AppUser`. | `fineract-security/.../service/BCryptPasswordEncoderFineractWrapper.java` |
+| BusinessDate | Per-tenant logical "today" that drives schedules, accrual, and reporting independent of wall-clock time. | `fineract-core/src/main/java/org/apache/fineract/infrastructure/businessdate/api/BusinessDateApiResource.java` |
+| BusinessEvent | Domain event raised by a write service (e.g. `LoanApprovedBusinessEvent`); consumed by external-event producers and hooks. | `fineract-core/.../infrastructure/event/business/domain/BusinessEvent.java` |
+| COB | Close-of-Business: nightly batch that advances the business date and processes per-loan tasklets. | `fineract-cob/src/main/java/org/apache/fineract/cob/loan/LoanCOBManagerService.java` |
+| CodeValue | Reference-data row (e.g. loan purpose, gender) attached to a `Code` lookup. | `fineract-core/.../infrastructure/codes/domain/CodeValue.java` |
+| CommandSource | Audit row written for every command, containing maker, checker, payload, and result hash. | `fineract-core/src/main/java/org/apache/fineract/commands/domain/CommandSource.java` |
+| CommandWrapper | Immutable record describing a command: action, entity, id, href, JSON body. | `fineract-core/src/main/java/org/apache/fineract/commands/service/CommandWrapper.java` |
+| CommandWrapperBuilder | Builder API resource classes use to construct a `CommandWrapper` from an HTTP request. | `fineract-core/src/main/java/org/apache/fineract/commands/service/CommandWrapperBuilder.java` |
+| DataTable | User-extensible flat table attached to a core entity (loan, client, etc.); editable through generic CRUD endpoints. | `fineract-core/.../infrastructure/dataqueries/service/ReadWriteNonCoreDataService.java` |
+| ExternalEvent | Domain event serialized to Avro and published to Kafka or ActiveMQ for downstream consumers. | `fineract-core/.../infrastructure/event/external/service/ExternalEventService.java` |
+| ExternalId | Stable, client-supplied identifier alongside Fineract's internal numeric id. Allows integrations to reference entities without owning the surrogate key. | `fineract-core/.../infrastructure/core/domain/ExternalId.java` |
+| FineractContext | Per-request context carrying tenant, business date, and authenticated user; held in a `ThreadLocal`. | `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/domain/FineractContext.java` |
+| FineractProperties | `@ConfigurationProperties("fineract")` binding for `application.properties`. | `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/config/FineractProperties.java` |
+| FloatingRate | Configurable rate (e.g. prime + spread) with effective-dated periods; consumed by loan products. | `fineract-rates/.../portfolio/floatingrates/domain/FloatingRate.java` |
+| GL (General Ledger) | The double-entry book; rooted in a Chart of Accounts (`GLAccount`). | `fineract-accounting/.../glaccount/domain/GLAccount.java` |
+| GLIM | Group Loan Individual Monitoring — a parent loan that aggregates individual member loans for group lending. | `fineract-loan/.../portfolio/loanaccount/data/GLIMContainer.java` |
+| GSIM | Group Savings Individual Monitoring — analogous parent/child structure for savings accounts. | `fineract-savings/.../portfolio/savings/domain/GSIMContainer.java` |
+| Hook | Outbound HTTP webhook fired on configured events. | `fineract-core/.../infrastructure/hooks/domain/Hook.java` |
+| Idempotency | Mechanism that lets a client safely retry a write by supplying an `Idempotency-Key` header; second call returns the stored result. | `fineract-command/.../service/IdempotencyKeyResolver.java` |
+| InlineCOB | A synchronous COB run triggered on-demand for a single loan, instead of waiting for the nightly batch. | `fineract-cob/.../cob/loan/InlineLoanCOBExecutorServiceImpl.java` |
+| JdbcSupport | Helper that converts `ResultSet` columns to Java types with null-safety; used by every read-platform service. | `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/service/database/JdbcSupport.java` |
+| JobName | Enum listing every Quartz-scheduled background job (interest posting, dormancy, accrual…). | `fineract-core/.../infrastructure/jobs/service/JobName.java` |
+| JournalEntry | Single debit or credit posting against a GL account; the immutable record of accounting state. | `fineract-accounting/src/main/java/org/apache/fineract/accounting/journalentry/domain/JournalEntry.java` |
+| JsonCommand | Typed view of the JSON body sent with a write request; provides `stringValueOfParameterNamed` and friends. | `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/api/JsonCommand.java` |
+| LiquibaseChangelog | XML/SQL change set that evolves the schema; tenant-list and per-tenant trees are separate. | `fineract-db/src/main/resources/db/changelog/tenant/db.changelog-master.xml` |
+| LoanCOB | The specific Spring Batch job that processes per-loan COB tasklets. | `fineract-cob/src/main/java/org/apache/fineract/cob/loan/LoanCOBManagerService.java` |
+| LoanRepaymentSchedule | Ordered list of installment rows attached to a loan; each row carries principal, interest, fees, penalties, and due date. | `fineract-loan/.../portfolio/loanaccount/domain/LoanRepaymentScheduleInstallment.java` |
+| MakerChecker | Two-eye approval workflow: one user submits a command (maker), another approves it (checker) before it executes. | `fineract-command/.../service/MakerCheckerWritePlatformService.java` |
+| MifosX | Predecessor project; "Fineract 1.x" is essentially MifosX donated to the ASF. Many code paths still reference it. | repository history, `STATIC_WEAVING.md` |
+| NPA | Non-Performing Asset — a loan past a configurable arrears threshold; tracked for provisioning and reporting. | `fineract-loan/.../portfolio/loanaccount/loanschedule/.../LoanArrearsAgeingService.java` |
+| OIDC | OpenID Connect; integration via Spring Security OAuth2 resource server. | `fineract-security/.../config/SecurityConfig.java`, `oauth2-tests/` |
+| OneFA | Single-factor authentication baseline (basic auth) when 2FA is disabled. | `fineract-security/.../filter/TenantAwareBasicAuthenticationFilter.java` |
+| OTP | One-Time Password emitted to the 2FA channel. | `fineract-core/.../infrastructure/security/data/OTPRequest.java` |
+| PaymentType | Categorizes a money movement (cash, ACH, mobile money). Drives accounting mappings. | `fineract-core/.../portfolio/paymenttype/domain/PaymentType.java` |
+| Penny gap | Rounding residue left after schedule generation; handled by the schedule generator to keep installments balanced. | `fineract-loan/.../portfolio/loanaccount/loanschedule/.../AbstractLoanScheduleGenerator.java` |
+| PlatformSecurityContext | Per-request accessor for the authenticated `AppUser` and tenant; injected into write services. | `fineract-core/src/main/java/org/apache/fineract/infrastructure/security/service/PlatformSecurityContext.java` |
+| ProgressiveLoan | Loan variant whose schedule is recomputed progressively as transactions occur. | `fineract-progressive-loan/.../portfolio/loanaccount/loanschedule/.../ProgressiveLoanInterestScheduleModel.java` |
+| ProvisioningCriteria | Rule set that maps arrears buckets to provisioning percentages for regulatory reporting. | `fineract-accounting/.../provisioning/domain/ProvisioningCriteria.java` |
+| Quartz | The scheduling framework Fineract uses for periodic background work; clustered through DB-backed Quartz tables. | `fineract-provider/.../infrastructure/jobs/service/SchedulerJobRunnerWriteServiceImpl.java` |
+| Recurring Deposit | Savings product variant where the client commits to depositing a fixed amount per period. | `fineract-savings/.../portfolio/savings/domain/RecurringDepositAccount.java` |
+| ReportingService | Component that runs Pentaho or SQL reports and streams results. | `fineract-report/.../infrastructure/dataqueries/service/ReadReportingService.java` |
+| Scheduler | The Quartz wrapper exposed via REST (start/stop, run job once). | `fineract-provider/.../infrastructure/jobs/api/SchedulerApiResource.java` |
+| ShareAccount | Share/equity-like savings product (capital shares in cooperatives). | `fineract-savings/.../portfolio/shareaccounts/domain/ShareAccount.java` |
+| SqlInjectionPreventer | Validator that rejects free-form SQL identifiers containing dangerous tokens; used by ad-hoc data table endpoints. | `fineract-core/.../infrastructure/security/utils/SQLInjectionValidator.java` |
+| StandingInstruction | Pre-authorized periodic transfer between accounts (e.g. monthly savings into a loan repayment). | `fineract-savings/.../portfolio/account/domain/AccountTransferStandingInstruction.java` |
+| Survey / SPM | Social Performance Management module; structured client surveys with scoring. | `fineract-provider/.../spm/domain/Survey.java` |
+| Tasklet | Spring Batch unit of work used by COB; one tasklet per business step (e.g. apply charges, accrue interest). | `fineract-cob/.../cob/loan/ApplyChargeToOverdueLoansBusinessStep.java` |
+| TenantStore | Holds the current tenant for the request thread; populated by `TenantAwareBasicAuthenticationFilter`. | `fineract-core/.../infrastructure/core/service/ThreadLocalContextUtil.java` |
+| Teller | Cash drawer abstraction with cashier assignments and cash-handling transactions. | `fineract-provider/.../organisation/teller/domain/Teller.java` |
+| TwoFactor | Configuration object describing OTP delivery and validation policy. | `fineract-provider/.../infrastructure/security/service/TwoFactorService.java` |
+| WorkingCapitalLoan | Revolving working-capital credit product with disbursement and repayment cycles. | `fineract-working-capital-loan/src/main/java/.../portfolio/loanaccount/` |
+| WritePlatformService | Conventional name for the domain service that executes a command (e.g. `LoanWritePlatformService`). | `fineract-loan/.../portfolio/loanaccount/service/LoanWritePlatformService.java` |
+
+## Term clusters
+
+Some terms cluster around a single concern. The accordions below group them so you can read a related set in one place.
+
+<AccordionGroup>
+  <Accordion title="Command bus terms">
+    `CommandWrapper`, `CommandWrapperBuilder`, `CommandSource`, `JsonCommand`, `MakerChecker`, `Idempotency`, `BusinessEvent`, `ExternalEvent`. Together they describe how a write request becomes durable state.
+  </Accordion>
+  <Accordion title="Accounting terms">
+    `GL`, `JournalEntry`, `AccountingBridge`, `Accrual`, `PaymentType`, `ProvisioningCriteria`. The accounting module is mostly read-after-write — it reacts to portfolio events and writes immutable journal rows.
+  </Accordion>
+  <Accordion title="Tenancy and runtime">
+    `TenantStore`, `FineractContext`, `FineractProperties`, `PlatformSecurityContext`, `AppUser`, `BusinessDate`. Every request thread carries a copy of these via `ThreadLocal`.
+  </Accordion>
+  <Accordion title="Batch and scheduling">
+    `Quartz`, `JobName`, `Scheduler`, `COB`, `LoanCOB`, `InlineCOB`, `Tasklet`. The COB engine is Spring Batch; the rest are Quartz cron jobs.
+  </Accordion>
+  <Accordion title="Lending products">
+    `LoanRepaymentSchedule`, `ProgressiveLoan`, `WorkingCapitalLoan`, `GLIM`, `Penny gap`, `NPA`. Lending is the largest functional area of the codebase.
+  </Accordion>
+  <Accordion title="Savings products">
+    `Recurring Deposit`, `ShareAccount`, `GSIM`, `StandingInstruction`. Savings shares many primitives with lending (charges, rates, tax) but its own schedule and posting logic.
+  </Accordion>
+  <Accordion title="Security and auth">
+    `BCrypt`, `OneFA`, `2FA`, `OTP`, `OIDC`. Selectable through Spring profiles and Spring Security configuration.
+  </Accordion>
+  <Accordion title="Reporting and reference data">
+    `ReportingService`, `DataTable`, `CodeValue`, `SqlInjectionPreventer`, `Survey/SPM`. The reporting layer leans heavily on user-extensible tables and ad-hoc SQL — hence the explicit injection preventer.
+  </Accordion>
+</AccordionGroup>
+
+## Acronyms cheat sheet
+
+When skimming Fineract issues, PRs, or chat, these abbreviations appear constantly. Memorize them and the codebase reads much faster.
+
+| Abbrev | Full form |
+|--------|-----------|
+| 2FA | Two-Factor Authentication |
+| API | Application Programming Interface |
+| ASF | Apache Software Foundation |
+| BD | Business Date |
+| BCrypt | (no acronym — algorithm name) |
+| COA | Chart of Accounts |
+| COB | Close-of-Business |
+| CWB | CommandWrapperBuilder |
+| DT | Data Table |
+| EOD | End-of-Day (interchangeable with COB) |
+| FD | Fixed Deposit |
+| FX | Foreign Exchange |
+| GL | General Ledger |
+| GLIM | Group Loan Individual Monitoring |
+| GSIM | Group Savings Individual Monitoring |
+| JPA | Java Persistence API |
+| KYC | Know Your Customer |
+| MM | Microfinance Institution (rare; sometimes "Mifos Mobile") |
+| MFI | Microfinance Institution |
+| NPA | Non-Performing Asset |
+| OIDC | OpenID Connect |
+| OTP | One-Time Password |
+| RD | Recurring Deposit |
+| SPM | Social Performance Management |
+| SQL | Structured Query Language |
+| WAR | Web Application aRchive |
+| XBRL | eXtensible Business Reporting Language (used by MIX reports) |
+
+## Naming conventions in code
+
+Once you internalize the term list above, the codebase becomes navigable largely through naming conventions. Fineract is extremely regular here.
+
+| Suffix | Role |
+|--------|------|
+| `*ApiResource` | Jersey JAX-RS endpoint class. |
+| `*WritePlatformService` | Domain service that executes commands and mutates state. |
+| `*WritePlatformServiceJpaRepositoryImpl` | Concrete write service implementation backed by JPA. |
+| `*ReadPlatformService` | Domain service that exposes read projections. |
+| `*ReadPlatformServiceImpl` | Concrete implementation, usually backed by `JdbcTemplate`. |
+| `*CommandHandler` | Thin `@CommandType` bean that wires a command to its write service. |
+| `*Repository` | Spring Data JPA repository over an aggregate root. |
+| `*Mapper` / `*RowMapper` | Maps a `ResultSet` row to a DTO. |
+| `*DataValidator` | Builds `ApiParameterError` lists for input. |
+| `*BusinessEvent` | Domain event raised inside a transaction. |
+| `*ExternalEvent` | Avro-serializable form of a business event. |
+| `*Container` | Aggregating wrapper, often used for GLIM/GSIM parent groupings. |
+| `*BusinessStep` | Spring Batch tasklet within a COB job. |
+
+<Info>
+The few times this convention is broken (e.g. `JsonCommand` instead of `JsonCommandData`) usually mark code that predates the convention — they are stable surface, just historically named.
+</Info>
+
+## Quick navigation by feature area
+
+<CardGroup cols={2}>
+  <Card title="Lending" icon="hand-holding-dollar">
+    Start at `fineract-loan/.../Loan.java` and walk outward through `LoanRepaymentScheduleInstallment`, `LoanTransaction`, `LoanWritePlatformService`. For progressive amortization see `fineract-progressive-loan`.
+  </Card>
+  <Card title="Savings" icon="piggy-bank">
+    Start at `fineract-savings/.../SavingsAccount.java`. `RecurringDepositAccount` and `FixedDepositAccount` extend the model; `ShareAccount` lives next door.
+  </Card>
+  <Card title="Accounting" icon="calculator">
+    `JournalEntry.java` is the core record. `AccountingProcessorHelper` and `AccrualBasedAccountingProcessorForLoan` translate portfolio transactions into postings.
+  </Card>
+  <Card title="Tenant & security" icon="shield-halved">
+    `FineractPlatformTenant`, `RoutingDataSource`, and `TenantAwareBasicAuthenticationFilter` define the multi-tenant contract. `AppUser` and `PlatformSecurityContext` model the request principal.
+  </Card>
+  <Card title="Batch & scheduling" icon="clock">
+    Quartz job catalogue lives in `JobName`. COB lives in `fineract-cob` and is orchestrated by `LoanCOBManagerService`. Inline runs go through `InlineLoanCOBExecutorServiceImpl`.
+  </Card>
+  <Card title="Reporting & data tables" icon="chart-line">
+    `ReadReportingService` runs Pentaho reports. `ReadWriteNonCoreDataService` powers extensible data tables. `SQLInjectionValidator` guards both.
+  </Card>
+</CardGroup>
+
+## REST headers you will see
+
+Several Fineract-specific HTTP headers are baked into the glossary because they show up in code and in client SDKs.
+
+| Header | Meaning | Implemented by |
+|--------|---------|----------------|
+| `Fineract-Platform-TenantId` | Selects the tenant whose data to operate on. | `TenantAwareBasicAuthenticationFilter` |
+| `Authorization` | Standard basic-auth or `Bearer` (OAuth2) token. | Spring Security |
+| `Fineract-Platform-OTP` | One-time password when 2FA is enabled. | `TwoFactorAuthenticationFilter` |
+| `Idempotency-Key` | Lets the client safely retry a write request. | `IdempotencyKeyResolver` |
+| `Command` (query param `?command=`) | Verb dispatcher used by API resources. | `CommandWrapperBuilder` and resource classes |
+
+## Common parameter names in JsonCommand
+
+Write requests carry JSON bodies. Across the codebase the parameter names are deliberately consistent; remembering this list speeds up reading `JsonCommand.stringValueOfParameterNamed("…")` calls.
+
+| Parameter name | Found on |
+|----------------|---------|
+| `locale`, `dateFormat` | Every body that contains dates or numbers. |
+| `externalId` | Any entity that supports a client-supplied id. |
+| `clientId`, `groupId`, `officeId`, `staffId` | Entity attachments. |
+| `productId` | Loan/savings/share product reference. |
+| `principal`, `numberOfRepayments`, `repaymentEvery`, `repaymentFrequencyType` | Loan terms. |
+| `interestRatePerPeriod`, `interestType`, `interestCalculationPeriodType` | Interest configuration. |
+| `expectedDisbursementDate`, `submittedOnDate`, `transactionDate` | Date inputs. |
+| `paymentTypeId`, `accountNumber`, `chequeNumber` | Payment detail. |
+| `note` | Free-form audit comment. |
+
+## Mini timeline of the project
+
+Knowing where Fineract comes from explains the leftover vocabulary.
+
+| Era | What happened |
+|-----|---------------|
+| Mifos (early 2000s) | Original Java microfinance platform from the Grameen Foundation. |
+| MifosX (2012) | Rewrite around a REST API and command bus — the direct ancestor of Fineract 1.x. |
+| Apache incubation (2016) | Project donated to the ASF; renamed Fineract. |
+| Fineract 1.x | Monolithic codebase, single Gradle project. |
+| Fineract today | Modularized into ~30 Gradle subprojects, Spring Boot 3, EclipseLink with static weaving, optional progressive loans, external Avro events. |
+
+That history is why you sometimes see `Mifos` references, `MifosX`-style class names, and a mix of newer and older idioms in adjacent files.
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="layer-group" href="/overview/architecture">
+    Where these terms fit in the layered pipeline.
+  </Card>
+  <Card title="Runtime model" icon="play" href="/overview/runtime-model">
+    Boot-time terms (FineractProfiles, FineractProperties, JobName).
+  </Card>
+  <Card title="Module graph" icon="diagram-project" href="/overview/module-graph">
+    Which subproject owns each term.
+  </Card>
+  <Card title="Repository layout" icon="folder-tree" href="/overview/repository-layout">
+    Annotated map of the file paths cited above.
+  </Card>
+</CardGroup>

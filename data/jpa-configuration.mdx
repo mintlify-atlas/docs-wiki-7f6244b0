@@ -1,0 +1,212 @@
+---
+title: "JPA and Hibernate-style configuration in Fineract"
+sidebarTitle: "JPA Configuration"
+description: "How Apache Fineract configures EclipseLink JPA: persistence unit, vendor properties, the RoutingDataSource, auditing, dialect-aware schema selection, and weaving."
+---
+
+Apache Fineract uses Spring Data JPA on top of **EclipseLink** — not Hibernate — but the surface area looks similar: an `EntityManagerFactory` bean, vendor properties, auditing, and a `RoutingDataSource` shared with raw JDBC. The whole wiring lives in one class, `JPAConfig`, plus a handful of collaborators. This page explains what each knob does and why.
+
+## The configuration entry point
+
+`fineract-provider/src/main/java/org/apache/fineract/infrastructure/core/config/jpa/JPAConfig.java` extends Spring Boot's `JpaBaseConfiguration` so most of the heavy lifting is inherited:
+
+```java
+@Configuration
+@EnableJpaAuditing
+@EnableJpaRepositories(basePackages = { "org.apache.fineract.**.domain",
+        "org.apache.fineract.**.repository" }, excludeFilters = @ComponentScan.Filter(type = FilterType.REGEX, pattern = {
+                "org\\.apache\\.fineract\\.command\\.jdbc\\.store\\.domain\\..*",
+                "org\\.apache\\.fineract\\.infrastructure\\.documentmanagement\\.domain\\..*Repository",
+                "org\\.apache\\.fineract\\.mix\\.domain\\..*Repository" }))
+@EnableConfigurationProperties(JpaProperties.class)
+@Import(JpaAuditingHandlerRegistrar.class)
+public class JPAConfig extends JpaBaseConfiguration {
+    public JPAConfig(RoutingDataSource dataSource, JpaProperties properties,
+            ObjectProvider<JtaTransactionManager> jtaTransactionManager,
+            DatabaseTypeResolver databaseTypeResolver,
+            Collection<EntityManagerFactoryCustomizer> customizers) {
+        super(dataSource, properties, jtaTransactionManager);
+        ...
+    }
+}
+```
+
+Two things deserve attention right away:
+
+1. The `dataSource` parameter is the `RoutingDataSource` — the tenant-aware façade. JPA never sees a "real" `HikariDataSource` directly.
+2. The `@EnableJpaRepositories` filter excludes a few packages (`command.jdbc.store`, `documentmanagement`, `mix`) that are handled by Spring Data **JDBC** instead. JPA and JDBC repositories cohabit the same application context.
+
+## EclipseLink, not Hibernate
+
+`createJpaVendorAdapter()` returns `new EclipseLinkJpaVendorAdapter()` and `getVendorProperties()` sets EclipseLink-specific keys:
+
+```java
+@Override
+protected Map<String, Object> getVendorProperties(DataSource dataSource) {
+    Map<String, Object> vendorProperties = new HashMap<>();
+    vendorProperties.put(PersistenceUnitProperties.WEAVING, "static");
+    vendorProperties.put(PersistenceUnitProperties.PERSISTENCE_CONTEXT_CLOSE_ON_COMMIT, "true");
+    vendorProperties.put(PersistenceUnitProperties.CACHE_SHARED_DEFAULT, "false");
+    emFactoryCustomizers.forEach(c -> vendorProperties.putAll(c.additionalVendorProperties()));
+    return vendorProperties;
+}
+```
+
+| Property | Value | Why |
+|----------|-------|-----|
+| `eclipselink.weaving` | `static` | Bytecode weaving runs at build time (Gradle plugin) so the classes are already woven when the JVM starts; this avoids the load-time-weaving agent. |
+| `eclipselink.persistence-context.close-on-commit` | `true` | Detach entities at transaction commit; safer for the request-per-thread model where a stale persistence context across requests would be a leak. |
+| `eclipselink.cache.shared.default` | `false` | Disable the EclipseLink shared (L2) entity cache by default. Fineract relies on Spring Cache for read paths instead — see `RuntimeDelegatingCacheManager`. |
+
+The `Collection<EntityManagerFactoryCustomizer> emFactoryCustomizers` extension point lets feature modules (e.g. `fineract-investor`, `fineract-loan`) add their own vendor properties, scanned packages, and persistence-unit post-processors without touching `JPAConfig` itself.
+
+## Entity scanning
+
+`getPackagesToScan()` starts with the umbrella `org.apache.fineract` package and adds anything customizers contribute:
+
+```java
+protected String[] getPackagesToScan() {
+    Set<String> packagesToScan = new HashSet<>();
+    packagesToScan.add("org.apache.fineract");
+    emFactoryCustomizers.forEach(c -> packagesToScan.addAll(c.additionalPackagesToScan()));
+    return packagesToScan.toArray(String[]::new);
+}
+```
+
+A single `jpa-pu` persistence unit covers the whole platform.
+
+## Dialect-aware schema selection
+
+The most Fineract-specific piece of JPA wiring is the `DatabaseSelectingPersistenceUnitPostProcessor`. It is added in `getPersistenceUnitPostProcessors()`:
+
+```java
+private PersistenceUnitPostProcessor[] getPersistenceUnitPostProcessors() {
+    Set<PersistenceUnitPostProcessor> processors = new HashSet<>();
+    processors.add(new DatabaseSelectingPersistenceUnitPostProcessor(databaseTypeResolver));
+    emFactoryCustomizers.forEach(c -> processors.addAll(c.additionalPersistenceUnitPostProcessors()));
+    return processors.toArray(PersistenceUnitPostProcessor[]::new);
+}
+```
+
+That post-processor consults `DatabaseTypeResolver.databaseType()` and adjusts the persistence unit (e.g. the schema generation hints) so that the same entity classes work whether the underlying database is MySQL/MariaDB or PostgreSQL. The actual dialect resolution happens at bootstrap, before the `EntityManagerFactory` is built — `DatabaseTypeResolver` implements `InitializingBean` and inspects the Hikari driver class name:
+
+```java
+private static final Map<String, DatabaseType> DRIVER_MAPPING = Map.of(
+    "org.mariadb.jdbc.Driver",   DatabaseType.MYSQL,
+    "com.mysql.jdbc.Driver",     DatabaseType.MYSQL,
+    "com.mysql.cj.jdbc.Driver",  DatabaseType.MYSQL,
+    "org.postgresql.Driver",     DatabaseType.POSTGRESQL);
+```
+
+If the driver class is not in that map the application fails fast with `IllegalArgumentException` — there is no implicit fallback.
+
+## Boot order: Liquibase first, then JPA
+
+The `entityManagerFactory` bean depends on `tenantDatabaseUpgradeService`:
+
+```java
+@Override
+@Bean
+@Primary
+@DependsOn("tenantDatabaseUpgradeService")
+public LocalContainerEntityManagerFactoryBean entityManagerFactory(...) {
+    ...
+}
+```
+
+This guarantees Liquibase has finished upgrading the tenant store and every tenant database before EclipseLink starts validating mappings against actual tables. Without the `@DependsOn` a fresh deployment would race: JPA might inspect tables that Liquibase has not created yet.
+
+## Auditing wiring
+
+Three pieces enable automatic audit fields on every `AbstractAuditableCustom` entity:
+
+1. `@EnableJpaAuditing` on `JPAConfig`.
+2. `@Import(JpaAuditingHandlerRegistrar.class)` so Spring Data registers the `AuditingEntityListener`.
+3. An `AuditorAware<Long>` bean:
+
+```java
+@Bean
+public AuditorAware<Long> auditorAware() {
+    return new AuditorAwareImpl();
+}
+```
+
+`AuditorAwareImpl` pulls the current `AppUser` out of `SecurityContextHolder` and returns its id; when no user is bound (e.g. a job thread) it falls back to the admin user constant. See [Audit fields](/data/audit-fields) for the full mapping.
+
+## The shared `RoutingDataSource`
+
+Every JPA repository, every `JdbcTemplate`, and the Spring transaction manager all share one `DataSource` bean — the `RoutingDataSource`:
+
+```mermaid
+flowchart LR
+    JpaRepo[JPA Repository]
+    JdbcTpl[JdbcTemplate<br/>NamedParameterJdbcTemplate]
+    Tx[ExtendedDataSourceTransactionManager]
+    JpaRepo --> EMF[EntityManagerFactory<br/>jpa-pu]
+    JdbcTpl --> RDS
+    EMF --> RDS[RoutingDataSource<br/>@Primary, name=dataSource]
+    Tx --> RDS
+    RDS --> Factory[RoutingDataSourceServiceFactory]
+    Factory --> Pool[Per-tenant HikariCP pool]
+```
+
+The factory consults `ThreadLocalContextUtil.getTenant()` and returns the right `DataSource`. JPA's persistence context, JDBC's `DataSourceUtils.getConnection()`, and the transaction manager therefore always agree on **which** connection is currently checked out — they all funnel through the same routing object. This is what makes a single `@Transactional` annotation cover both ORM and raw SQL work in the same method.
+
+## The persistence-unit post-processor chain
+
+The customizer-driven design means a module can do things like:
+
+- add a different package to scan (`additionalPackagesToScan`),
+- inject EclipseLink-specific session customizers (`additionalVendorProperties`),
+- swap or augment naming strategies via a `PersistenceUnitPostProcessor` (`additionalPersistenceUnitPostProcessors`).
+
+A typical use is `fineract-investor` registering its `@MappedSuperclass` packages so its entities are discovered even though they are not in `org.apache.fineract.portfolio` directly.
+
+<Note>
+Persistence-unit post-processors run **once**, when the EMF is being built. They cannot be used to do per-request work — for that, use a `DataSource` interceptor or a transaction lifecycle callback instead.
+</Note>
+
+## Static weaving
+
+EclipseLink can rewrite entity bytecode to make lazy loading and change tracking work without dynamic proxies. Fineract runs the weaver at build time:
+
+- The Gradle build invokes the EclipseLink static weaver after compilation.
+- `eclipselink.weaving=static` tells the runtime not to attempt load-time weaving.
+
+Practically this means the entity classes you read in the source tree are not exactly the same bytes that run in production — but the diff is invisible to application code. Tests that disable weaving (rare) must fall back to `eclipselink.weaving=false` and accept the loss of attribute-level change tracking.
+
+## Transactional behaviour
+
+`JPAConfig` does not declare its own `PlatformTransactionManager`. That bean comes from `JdbcTransactionConfig`:
+
+```java
+@Bean
+public PlatformTransactionManager jdbcTransactionManager(FineractProperties fineractProperties,
+        RoutingDataSource dataSource,
+        ObjectProvider<TransactionManagerCustomizers> customizers,
+        List<TransactionLifecycleCallback> callbacks) {
+    boolean readOnly = fineractProperties.getMode().isReadOnlyMode();
+    ExtendedDataSourceTransactionManager tm = new ExtendedDataSourceTransactionManager(readOnly);
+    tm.setDataSource(dataSource);
+    tm.setLifecycleCallbacks(callbacks);
+    tm.setValidateExistingTransaction(true);
+    customizers.ifAvailable(c -> c.customize(tm));
+    return tm;
+}
+```
+
+Notice it is a `DataSourceTransactionManager` (subclassed for lifecycle hooks), not a `JpaTransactionManager`. That choice is deliberate: because raw JDBC and JPA share the same `DataSource`, a JDBC-style transaction manager binds the JDBC `Connection` to the thread, and EclipseLink picks up that same connection via Spring's `DataSourceUtils` machinery. The transaction is therefore truly shared between JPA mutations and JDBC reads inside a single service method.
+
+## Common pitfalls
+
+<Warning>
+- Adding `@PersistenceContext(unitName = "...")` is unnecessary and risky — there is only one persistence unit (`jpa-pu`). Multiple persistence units would each need a separate `RoutingDataSource` wrapper.
+- Setting `spring.jpa.hibernate.naming.*` properties does nothing: Fineract uses EclipseLink, and Boot's Hibernate naming strategies are irrelevant.
+- Re-enabling the L2 cache (`eclipselink.cache.shared.default=true`) without also stamping cache keys with the tenant id will leak entities across tenants. The Spring-Cache–based caches in Fineract include the tenant identifier in the cache key explicitly.
+</Warning>
+
+## Where this connects
+
+- [Database routing](/data/database-routing) explains the `RoutingDataSource` lookup that JPA piggybacks on.
+- [Audit fields](/data/audit-fields) details the auditing beans wired here.
+- [Transactional boundaries](/data/transactional-boundaries) covers how `@Transactional` interacts with the shared `DataSource`.

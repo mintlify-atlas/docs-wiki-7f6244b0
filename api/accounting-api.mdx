@@ -1,0 +1,311 @@
+---
+title: "Accounting APIs: GL, journal entries, rules and closures"
+sidebarTitle: "Accounting API"
+description: "GLAccountsApiResource, JournalEntriesApiResource, AccountingRuleApiResource, GLClosuresApiResource and FinancialActivityAccountsApiResource in Fineract."
+---
+
+The accounting surface of Apache Fineract is what turns loan, savings and
+deposit activity into a real general ledger. Five JAX-RS resources cover the
+discipline end-to-end: the chart of accounts, manual journal entries,
+re-usable double-entry rules, period closures, and the named mappings that
+back the platform's automated financial activities.
+
+All five resources are owned by the `fineract-accounting` module (with
+`JournalEntriesApiResource` living in `fineract-provider`) and validate
+permissions against the `GLACCOUNT`, `JOURNALENTRY`, `ACCOUNTINGRULE`,
+`GLCLOSURE`, and `FINANCIALACTIVITYACCOUNT` resource names.
+
+## Source files
+
+| Concern | File |
+| --- | --- |
+| Chart of accounts | `fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/api/GLAccountsApiResource.java` |
+| Journal entries | `fineract-provider/src/main/java/org/apache/fineract/accounting/journalentry/api/JournalEntriesApiResource.java` |
+| Re-usable accounting rules | `fineract-accounting/src/main/java/org/apache/fineract/accounting/rule/api/AccountingRuleApiResource.java` |
+| GL period closure | `fineract-accounting/src/main/java/org/apache/fineract/accounting/closure/api/GLClosuresApiResource.java` |
+| Financial activity mapping | `fineract-accounting/src/main/java/org/apache/fineract/accounting/financialactivityaccount/api/FinancialActivityAccountsApiResource.java` |
+
+## Endpoint catalog
+
+### GL accounts — `/v1/glaccounts`
+
+| Verb | Path | `command` | Permission |
+| --- | --- | --- | --- |
+| `GET` | `/v1/glaccounts` | – | `READ_GLACCOUNT` |
+| `GET` | `/v1/glaccounts/template` | – | `READ_GLACCOUNT` |
+| `GET` | `/v1/glaccounts/{glAccountId}` | – | `READ_GLACCOUNT` |
+| `POST` | `/v1/glaccounts` | – | `CREATE_GLACCOUNT` |
+| `PUT` | `/v1/glaccounts/{glAccountId}` | – | `UPDATE_GLACCOUNT` |
+| `DELETE` | `/v1/glaccounts/{glAccountId}` | – | `DELETE_GLACCOUNT` |
+
+### Journal entries — `/v1/journalentries`
+
+| Verb | Path | `command` | Permission |
+| --- | --- | --- | --- |
+| `GET` | `/v1/journalentries` | – | `READ_JOURNALENTRY` |
+| `GET` | `/v1/journalentries/{transactionId}` | – | `READ_JOURNALENTRY` |
+| `POST` | `/v1/journalentries` | – | `CREATE_JOURNALENTRY` |
+| `POST` | `/v1/journalentries` | `reverse` | `REVERSE_JOURNALENTRY` |
+| `POST` | `/v1/journalentries` | `updateRunningBalance` | `UPDATERUNNINGBALANCE_JOURNALENTRY` |
+| `POST` | `/v1/journalentries/{transactionId}` | `defineOpeningBalance` | `DEFINEOPENINGBALANCE_JOURNALENTRY` |
+
+### Accounting rules — `/v1/accountingrules`
+
+| Verb | Path | `command` | Permission |
+| --- | --- | --- | --- |
+| `GET` | `/v1/accountingrules` | – | `READ_ACCOUNTINGRULE` |
+| `GET` | `/v1/accountingrules/template` | – | `READ_ACCOUNTINGRULE` |
+| `GET` | `/v1/accountingrules/{accountingRuleId}` | – | `READ_ACCOUNTINGRULE` |
+| `POST` | `/v1/accountingrules` | – | `CREATE_ACCOUNTINGRULE` |
+| `PUT` | `/v1/accountingrules/{accountingRuleId}` | – | `UPDATE_ACCOUNTINGRULE` |
+| `DELETE` | `/v1/accountingrules/{accountingRuleId}` | – | `DELETE_ACCOUNTINGRULE` |
+
+### GL closures — `/v1/glclosures`
+
+| Verb | Path | `command` | Permission |
+| --- | --- | --- | --- |
+| `GET` | `/v1/glclosures` | – | `READ_GLCLOSURE` |
+| `GET` | `/v1/glclosures/{glClosureId}` | – | `READ_GLCLOSURE` |
+| `POST` | `/v1/glclosures` | – | `CREATE_GLCLOSURE` |
+| `PUT` | `/v1/glclosures/{glClosureId}` | – | `UPDATE_GLCLOSURE` |
+| `DELETE` | `/v1/glclosures/{glClosureId}` | – | `DELETE_GLCLOSURE` |
+
+### Financial activity mappings — `/v1/financialactivityaccounts`
+
+| Verb | Path | `command` | Permission |
+| --- | --- | --- | --- |
+| `GET` | `/v1/financialactivityaccounts` | – | `READ_FINANCIALACTIVITYACCOUNT` |
+| `GET` | `/v1/financialactivityaccounts/template` | – | `READ_FINANCIALACTIVITYACCOUNT` |
+| `GET` | `/v1/financialactivityaccounts/{mappingId}` | – | `READ_FINANCIALACTIVITYACCOUNT` |
+| `POST` | `/v1/financialactivityaccounts` | – | `CREATE_FINANCIALACTIVITYACCOUNT` |
+| `PUT` | `/v1/financialactivityaccounts/{mappingId}` | – | `UPDATE_FINANCIALACTIVITYACCOUNT` |
+| `DELETE` | `/v1/financialactivityaccounts/{mappingId}` | – | `DELETE_FINANCIALACTIVITYACCOUNT` |
+
+## Creating a GL account
+
+<CodeGroup>
+
+```json POST /v1/glaccounts
+{
+  "name": "Cash on hand",
+  "glCode": "100001",
+  "manualEntriesAllowed": true,
+  "type": 1,
+  "usage": 1,
+  "description": "Branch teller cash drawer",
+  "tagId": null
+}
+```
+
+```json POST /v1/glaccounts (header)
+{
+  "name": "Assets",
+  "glCode": "100",
+  "manualEntriesAllowed": false,
+  "type": 1,
+  "usage": 2
+}
+```
+
+</CodeGroup>
+
+`type` is `1` Asset, `2` Liability, `3` Equity, `4` Income, `5` Expense.
+`usage` is `1` Detail or `2` Header — only detail accounts can receive postings.
+
+## Posting a manual journal entry
+
+```json POST /v1/journalentries
+{
+  "officeId": 1,
+  "transactionDate": "27 February 2025",
+  "currencyCode": "USD",
+  "comments": "Stationery purchase",
+  "referenceNumber": "INV-44210",
+  "credits": [
+    { "glAccountId": 12, "amount": "50.00" }
+  ],
+  "debits": [
+    { "glAccountId": 47, "amount": "50.00" }
+  ],
+  "paymentTypeId": 1,
+  "accountNumber": "100001",
+  "checkNumber": "",
+  "routingCode": "",
+  "receiptNumber": "RX-0099",
+  "bankNumber": "",
+  "dateFormat": "dd MMMM yyyy",
+  "locale": "en"
+}
+```
+
+<Note>
+Fineract enforces double-entry: the sum of `debits[].amount` must equal the
+sum of `credits[].amount` for the same `currencyCode`. The resulting
+transaction id is what `?command=reverse` accepts on the same endpoint to
+generate the offsetting entries.
+</Note>
+
+## Example response
+
+```json
+{
+  "officeId": 1,
+  "transactionId": "S2",
+  "resourceId": 0,
+  "changes": {
+    "transactionDate": "27 February 2025",
+    "comments": "Stationery purchase"
+  }
+}
+```
+
+The `transactionId` is a Fineract-issued string prefixed with `S` for a manual
+journal, `L` for a loan-driven entry, and `S` for savings — handy when
+filtering `GET /v1/journalentries?transactionId=…`.
+
+## Period closure
+
+```json POST /v1/glclosures
+{
+  "officeId": 1,
+  "closingDate": "31 January 2025",
+  "comments": "January 2025 month-end close",
+  "dateFormat": "dd MMMM yyyy",
+  "locale": "en"
+}
+```
+
+After a closure exists for an office, no journal entry — manual or
+system-generated — can post with a `transactionDate` on or before the
+`closingDate` until the closure is deleted.
+
+<Warning>
+Closures are non-destructive but ordering matters: you cannot delete a closure
+older than another closure for the same office. Always remove the newest one
+first.
+</Warning>
+
+## Accounting rule example
+
+Accounting rules let you pre-define common debit/credit pairs so operators can
+post repetitive manual entries from a dropdown without picking GL accounts
+each time.
+
+```json POST /v1/accountingrules
+{
+  "name": "Office rent payment",
+  "officeId": 1,
+  "accountToCredit": 11,
+  "accountToDebit": 53,
+  "allowMultipleDebitEntries": false,
+  "allowMultipleCreditEntries": false,
+  "description": "Monthly office lease"
+}
+```
+
+## Financial activity mapping
+
+Internal flows like `LIABILITY_TRANSFER` between savings and loans need a
+single account to bridge the two sides. The financial-activity mapping is how
+you wire them up:
+
+```json POST /v1/financialactivityaccounts
+{
+  "financialActivityId": 200,
+  "glAccountId": 18
+}
+```
+
+| `financialActivityId` | Activity |
+| --- | --- |
+| `100` | Asset transfer |
+| `101` | Asset fund source |
+| `200` | Liability transfer |
+| `201` | Cash at main vault |
+| `202` | Cash at teller |
+| `300` | Opening balances transfer contra |
+
+## Posting flow
+
+```mermaid
+flowchart LR
+    L[Loan disbursal] --> JE[JournalEntryWritePlatformService]
+    S[Savings deposit] --> JE
+    M[POST /v1/journalentries] --> JE
+    JE --> GL[(acc_gl_journal_entry)]
+    GL --> RB[Running balance update]
+    RB --> R[GET /v1/glaccounts/{id} balance]
+```
+
+## Listing and filtering journal entries
+
+The `GET /v1/journalentries` endpoint supports a generous filter surface
+that matches what the reference UI exposes on the GL inquiry screen.
+
+| Query parameter | Purpose |
+| --- | --- |
+| `officeId` | Restrict to an office |
+| `glAccountId` | Restrict to a single account |
+| `manualEntriesOnly` | `true` to hide system-generated postings |
+| `fromDate` / `toDate` | Date range filter on `transactionDate` |
+| `transactionId` | Fetch every leg of a single transaction |
+| `entityType` / `entityId` | Narrow to a loan, savings, or share account |
+| `runningBalance` | Include running balance per row when `true` |
+| `transactionDetails` | Include payment-type and metadata sub-object |
+
+```bash
+GET /v1/journalentries?officeId=1&fromDate=01 February 2025&toDate=28 February 2025&runningBalance=true&dateFormat=dd MMMM yyyy&locale=en
+```
+
+## Reversing a journal entry
+
+```bash
+POST /v1/journalentries/S2?command=reverse
+```
+
+The handler clones the entry, flips the debit and credit legs, posts on the
+supplied `transactionDate`, and links the reversal to the original via
+`reversalTransactionId`. Reversal is itself logged as a command source so it
+is fully auditable.
+
+## Updating running balances
+
+The `?command=updateRunningBalance` operation recomputes the
+`runningBalance` for every GL account in the supplied office. It is what
+the `Update accounting running balances` scheduled job calls under the
+hood, and it is safe to invoke on demand after a large back-dated import.
+
+```json POST /v1/journalentries?command=updateRunningBalance
+{
+  "officeId": 1
+}
+```
+
+## Defining an opening balance
+
+For a brand-new office, post the opening trial balance with the dedicated
+opening-balance command — it bypasses GL-closure validations and tags the
+resulting transaction with `isOpening: true`.
+
+```json POST /v1/journalentries/0?command=defineOpeningBalance
+{
+  "officeId": 1,
+  "transactionDate": "01 January 2025",
+  "currencyCode": "USD",
+  "credits": [{ "glAccountId": 1, "amount": "1000000" }],
+  "debits": [{ "glAccountId": 7, "amount": "1000000" }],
+  "locale": "en",
+  "dateFormat": "dd MMMM yyyy"
+}
+```
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="Loans API" href="/api/loans-api">
+    Loan transactions automatically generate journal entries.
+  </Card>
+  <Card title="Savings API" href="/api/savings-api">
+    Savings transactions follow the same accounting path.
+  </Card>
+</CardGroup>

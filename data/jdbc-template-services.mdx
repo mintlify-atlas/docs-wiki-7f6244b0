@@ -1,0 +1,222 @@
+---
+title: "JDBC template services and named parameters"
+sidebarTitle: "JDBC Templates"
+description: "How Apache Fineract read services use NamedParameterJdbcTemplate, RowMapper conventions, the SQL schema builder pattern, and database-portability shims."
+---
+
+For write-side code Apache Fineract uses JPA repositories; for the read side it bypasses JPA and goes straight to Spring's `JdbcTemplate` and `NamedParameterJdbcTemplate`. The reason is performance: the report-style queries used by clients, loans, savings, and accounting screens are too wide and too join-heavy for entity hydration to be a good fit. This page explains the conventions every `*ReadPlatformServiceImpl` follows.
+
+## The two template beans
+
+Both templates wrap the `RoutingDataSource`, declared in `JdbcConfig`:
+
+```java
+@Profile("!liquibase-only")
+@Configuration
+@EnableJdbcRepositories(basePackages = {
+        "org.apache.fineract.command.jdbc.store.domain",
+        "org.apache.fineract.infrastructure.documentmanagement.domain",
+        "org.apache.fineract.mix.domain" },
+    jdbcOperationsRef = "namedParameterJdbcTemplate",
+    transactionManagerRef = "jdbcTransactionManager")
+public class JdbcConfig {
+
+    @Bean
+    public JdbcTemplate jdbcTemplate(RoutingDataSource dataSource) {
+        return new JdbcTemplate(dataSource);
+    }
+
+    @Bean
+    public NamedParameterJdbcTemplate namedParameterJdbcTemplate(RoutingDataSource dataSource) {
+        return new NamedParameterJdbcTemplate(dataSource);
+    }
+}
+```
+
+A few things follow from this:
+
+- Both templates use the tenant-routing `DataSource`, so a query made from a `@Transactional` service hits the same Hikari connection the JPA persistence context is using.
+- A handful of repositories (`command.jdbc.store`, `documentmanagement`, `mix`) are Spring Data **JDBC** repositories. They share the `NamedParameterJdbcTemplate` and the `jdbcTransactionManager`.
+- The `liquibase-only` profile excludes this configuration: when running migrations only, no JDBC machinery is needed.
+
+## The `*ReadPlatformServiceImpl` pattern
+
+Read services follow a consistent shape. `ChargeReadPlatformServiceImpl` is a representative example:
+
+```java
+@RequiredArgsConstructor
+@Transactional(readOnly = true)
+public class ChargeReadPlatformServiceImpl implements ChargeReadPlatformService {
+
+    private final CurrencyReadPlatformService currencyReadPlatformService;
+    private final ChargeDropdownReadPlatformService chargeDropdownReadPlatformService;
+    private final JdbcTemplate jdbcTemplate;
+    private final DropdownReadPlatformService dropdownReadPlatformService;
+    private final FineractEntityAccessUtil fineractEntityAccessUtil;
+    private final AccountingDropdownReadPlatformService accountingDropdownReadPlatformService;
+    private final TaxReadPlatformService taxReadPlatformService;
+    private final ConfigurationDomainServiceJpa configurationDomainServiceJpa;
+    private final NamedParameterJdbcTemplate namedParameterJdbcTemplate;
+
+    @Override
+    @Cacheable(value = "charges", key = "T(...ThreadLocalContextUtil).getTenant()...")
+    public List<ChargeData> retrieveAllCharges() {
+        final ChargeMapper rm = new ChargeMapper();
+        String sql = "select " + rm.chargeSchema() + " where c.is_deleted=false ";
+        ...
+    }
+}
+```
+
+Recurring features:
+
+1. **`@Transactional(readOnly = true)` at class level** — read services participate in a read-only transaction that the connection pool can optimize, and that signals intent to other developers.
+2. **Both templates injected** — the plain `JdbcTemplate` for positional-parameter queries, the `NamedParameterJdbcTemplate` for queries with `:like`, `:limit`, or `IN` lists.
+3. **A nested `RowMapper`** — e.g. `ChargeMapper implements RowMapper<ChargeData>`.
+4. **A `schema()` method on the mapper** — returns the `SELECT` column list, so the same SQL fragment is used for the query and to drive the mapper.
+5. **`@Cacheable` for reference data** — keyed by the current tenant identifier via `ThreadLocalContextUtil.getTenant()`, so two tenants never see each other's cached rows.
+6. **No `entityManager` injection** — these classes are pure JDBC; they neither participate in the EclipseLink persistence context nor flush it.
+
+## The "schema builder" idiom
+
+The mapper exposes the column list as a method:
+
+```java
+public String chargeSchema() {
+    return "c.id as id, c.name as name, c.amount as amount, "
+         + "c.currency_code as currencyCode, c.charge_applies_to_enum as chargeAppliesTo, "
+         + "c.charge_time_enum as chargeTime, ... "
+         + "from m_charge c "
+         + "join m_organisation_currency oc on c.currency_code = oc.code "
+         + "left join m_tax_group tg on c.tax_group_id = tg.id ";
+}
+```
+
+And the service composes the full query around it:
+
+```java
+String sql = "select " + rm.chargeSchema() + " where c.is_deleted = false and c.id = ?";
+return jdbcTemplate.queryForObject(sql, rm, chargeId);
+```
+
+The benefits are concrete:
+
+- **Single source of truth**: column aliases and join graph live in one place, used by `retrieveOne`, `retrieveAll`, and any filtered overloads.
+- **Refactor-safe**: renaming an alias means changing one method, and the compiler catches the corresponding `rs.getString("...")` access in the mapper.
+- **Avoids `SELECT *`**: the projection is always explicit, so the database can use covering indexes and the application never depends on column order.
+
+## Reading a `ResultSet` with `JdbcSupport`
+
+`org.apache.fineract.infrastructure.core.domain.JdbcSupport` is the small utility every mapper uses to read nullable columns into the right Java type:
+
+- `JdbcSupport.getLocalDate(rs, "due_date")` — nullable `LocalDate`.
+- `JdbcSupport.getBigDecimalDefaultToNullIfZero(rs, "amount")` — convenient for monetary columns that store zero for "unspecified".
+- `JdbcSupport.getLongActualValue(rs, "id")` — safer than `rs.getLong("id")` because it returns `null` rather than `0` when the column is null.
+- `JdbcSupport.getOffsetDateTime(rs, "created_date")` — handles `TIMESTAMP WITH TIMEZONE` portability between MySQL and PostgreSQL.
+
+These wrappers exist because plain JDBC's `rs.getXxx` either returns the default value for nulls (e.g. `0` for `getLong`) or throws — both inconvenient for nullable columns, of which Fineract has many.
+
+## Named parameters and `IN` lists
+
+The `NamedParameterJdbcTemplate` is the right tool when the query has many parameters, or when the parameter list is variable in length:
+
+```java
+MapSqlParameterSource params = new MapSqlParameterSource()
+        .addValue("loanIds", loanIds)
+        .addValue("statusEnum", LoanStatus.ACTIVE.getValue());
+String sql = "select " + mapper.schema()
+           + " where l.id in (:loanIds) and l.loan_status_id = :statusEnum";
+return namedParameterJdbcTemplate.query(sql, params, mapper);
+```
+
+Spring expands the `:loanIds` collection into a placeholder list of the right size and binds each value individually. The `DatabaseSpecificSQLGenerator.IN_CLAUSE_MAX_PARAMS = 10_000` constant is the safety cap for very large `IN` lists; callers that might exceed it should chunk their input.
+
+## Database portability shims
+
+The same query string usually runs against MySQL/MariaDB and PostgreSQL. Differences are absorbed by a small helper, `DatabaseSpecificSQLGenerator`:
+
+| Concern | MySQL | PostgreSQL | Generator method |
+|---------|-------|-----------|------------------|
+| Identifier quoting | `` `col` `` | `"col"` | `escape(String)` |
+| Group concatenation | `GROUP_CONCAT(x)` | `STRING_AGG(x::varchar, ',')` | `groupConcat(String)` |
+| Pagination | `LIMIT offset, count` | `LIMIT count OFFSET offset` | `limit(int, int)` |
+| Fast row count | `SQL_CALC_FOUND_ROWS` + `SELECT FOUND_ROWS()` | wrap query in `SELECT COUNT(*) FROM (...) AS temp` | `calcFoundRows()` / `countQueryResult(String)` |
+| Current business date | `DATE('yyyy-MM-dd')` | `DATE 'yyyy-MM-dd'` | `currentBusinessDate()` |
+
+Inject `DatabaseSpecificSQLGenerator` into the read service and use its methods instead of hard-coding dialect-specific syntax:
+
+```java
+String sql = "select " + sqlGenerator.calcFoundRows() + " " + mapper.schema()
+           + " where ... order by l.id " + sqlGenerator.limit(limit, offset);
+```
+
+The full mechanics are covered in [Dialect abstraction](/data/database-dialect-abstraction).
+
+## Pagination and total counts
+
+Two patterns coexist for paged queries:
+
+<Tabs>
+<Tab title="MySQL fast path">
+On MySQL the read service issues:
+
+```sql
+select SQL_CALC_FOUND_ROWS ... from m_loan l ... LIMIT 0, 50
+```
+
+then a follow-up:
+
+```sql
+SELECT FOUND_ROWS()
+```
+
+Two round-trips, but the second one is essentially free because MySQL has already computed the count.
+</Tab>
+<Tab title="Portable path">
+On PostgreSQL (and the default fallback) the read service wraps the query:
+
+```sql
+SELECT COUNT(*) FROM (
+   select ... from m_loan l ... -- without LIMIT/OFFSET
+) AS temp
+```
+
+`DatabaseSpecificSQLGenerator.countQueryResult(String)` does the wrapping for you, including stripping any `LIMIT`/`OFFSET` clauses from the inner SQL.
+</Tab>
+</Tabs>
+
+## Caching read services
+
+`@Cacheable` is used heavily on reference-data lookups (charges, codes, currencies, products). The cache key always includes the tenant identifier:
+
+```java
+@Cacheable(value = "charges",
+           key = "T(org.apache.fineract.infrastructure.core.service.ThreadLocalContextUtil)"
+               + ".getTenant().getTenantIdentifier().concat('ch')")
+```
+
+The matching `CacheConfig` registers a `RuntimeDelegatingCacheManager` that lets administrators flip caching strategy at runtime (per-tenant local cache vs. shared distributed cache). Because the key is tenant-scoped, switching tenants on the same thread never leaks data.
+
+## When to use which template
+
+<Tip>
+- Use `JdbcTemplate` when the parameter set is small and positional binding is obvious.
+- Use `NamedParameterJdbcTemplate` when the query has more than a couple of placeholders, when the same parameter is referenced more than once, or when there is an `IN` list.
+- Use Spring Data JDBC repositories (one of the three packages enabled in `JdbcConfig`) when the table is small, flat, and the query is plain CRUD.
+- Use a JPA repository when you need entity identity, optimistic locking, or relations — i.e. for the write side of the domain.
+</Tip>
+
+## Anti-patterns to avoid
+
+<Warning>
+- **Do not** call `dataSource.getConnection()` directly. Spring's `DataSourceUtils.getConnection(dataSource)` (which both templates use under the hood) returns the transaction-bound connection; bypassing it breaks transaction sharing with JPA.
+- **Do not** concatenate untrusted strings into SQL — both templates support parameter binding for a reason. The schema builder pattern is only for column *names* that are constants in the codebase.
+- **Do not** mix `JdbcTemplate` writes with JPA mutations in the same method without thinking about flush order — EclipseLink may not have flushed pending changes when the SQL query runs. Use `entityManager.flush()` explicitly or restructure the call.
+- **Do not** open a cursor and iterate outside the transaction boundary. The transaction closes on method return; long iterations should be wrapped in `TransactionTemplate` or split into pages.
+</Warning>
+
+## Related pages
+
+- [Dialect abstraction](/data/database-dialect-abstraction) for `DatabaseSpecificSQLGenerator` in depth.
+- [Database routing](/data/database-routing) for how the `RoutingDataSource` makes both templates tenant-aware.
+- [Transactional boundaries](/data/transactional-boundaries) for how `@Transactional(readOnly = true)` interacts with the transaction manager.

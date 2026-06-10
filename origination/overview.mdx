@@ -1,0 +1,294 @@
+---
+title: "Loan origination module overview and layout"
+sidebarTitle: "Overview"
+description: "Tour of fineract-loan-origination — loan originator records, mappings, and how they attach to applications during the submit lifecycle."
+---
+
+The `fineract-loan-origination` module tracks **who originated a loan**
+— the broker, agent, branch staff, or partner channel that introduced the
+borrower. It's a thin module: one entity for the originator, one for the
+mapping between originator and loan, a small REST surface, and a
+linking service that the loan engine calls at application submission.
+
+If you came looking for a multi-stage application *workflow* engine,
+that's not what this module is. Application stages (submit / approve /
+disburse) belong to the core loan lifecycle; this module enriches that
+lifecycle with attribution metadata.
+
+## Package layout
+
+```text
+fineract-loan-origination/src/main/java/org/apache/fineract/
+└── portfolio/loanorigination/
+    ├── api/             # LoanOriginatorApiResource, LoanOriginatorsApiResource
+    ├── config/          # Spring auto-configuration
+    ├── data/            # DTOs (LoanApplicationOriginatorData, …)
+    ├── domain/          # LoanOriginator, LoanOriginatorMapping, …
+    ├── enricher/        # Attaches originator info to loan responses
+    ├── exception/       # LoanOriginator*Exception family
+    ├── handler/         # Command handlers
+    ├── helper/          # LoanOriginatorHelper
+    ├── mapper/          # Persistence-DTO mappers
+    ├── serialization/   # JSON validators
+    └── service/         # Read + write platform services, linking service
+```
+
+Every bean is guarded by:
+
+```java
+@ConditionalOnProperty(value = "fineract.module.loan-origination.enabled",
+                       havingValue = "true")
+```
+
+…so the module is opt-in per deployment.
+
+## Domain model
+
+<CardGroup cols={2}>
+  <Card title="LoanOriginator" icon="user-tie">
+    The originator party. Persisted to `m_loan_originator`.
+  </Card>
+  <Card title="LoanOriginatorMapping" icon="link">
+    A many-to-many bridge between loans and originators. Persisted to
+    `m_loan_originator_mapping`.
+  </Card>
+  <Card title="LoanOriginatorStatus" icon="toggle-on">
+    Lifecycle enum: `ACTIVE`, `PENDING`, `INACTIVE`. Only `ACTIVE`
+    originators can be linked to a new application.
+  </Card>
+  <Card title="LoanApplicationOriginatorData" icon="file-lines">
+    JSON DTO carried in loan submit payloads. The loan engine forwards
+    it to `LoanOriginatorLinkingService` for processing.
+  </Card>
+</CardGroup>
+
+### LoanOriginator
+
+```java
+@Entity
+@Table(name = "m_loan_originator")
+public class LoanOriginator extends AbstractAuditableWithUTCDateTimeCustom<Long> {
+
+    @Column(name = "external_id", nullable = false, length = 100, unique = true)
+    private ExternalId externalId;
+
+    @Column(name = "name", length = 255)
+    private String name;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", nullable = false, length = 20)
+    private LoanOriginatorStatus status;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "originator_type_cv_id")
+    private CodeValue originatorType;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "channel_type_cv_id")
+    private CodeValue channelType;
+    // …
+}
+```
+
+Key points:
+
+- **External ID is unique** and required — originators are usually
+  managed in an external CRM, and that ID is the bridge.
+- **Type and channel** are CodeValue references, letting each tenant
+  define its own taxonomy (`BROKER`, `BRANCH_STAFF`, `PARTNER_BANK`, etc.).
+- **Audit columns** come from `AbstractAuditableWithUTCDateTimeCustom`
+  — created/modified user and timestamps are populated automatically.
+
+### LoanOriginatorMapping
+
+```java
+@Entity
+@Table(name = "m_loan_originator_mapping")
+public class LoanOriginatorMapping extends AbstractAuditableWithUTCDateTimeCustom<Long> {
+
+    @Column(name = "loan_id", nullable = false)
+    private Long loanId;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "originator_id", nullable = false)
+    private LoanOriginator originator;
+
+    public static LoanOriginatorMapping create(Long loanId, LoanOriginator originator) { … }
+}
+```
+
+A loan can have many originators (lead broker + closing branch staff,
+for instance). The mapping is the source of truth for revenue-share
+reporting downstream.
+
+### LoanOriginatorStatus
+
+```java
+public enum LoanOriginatorStatus { ACTIVE, PENDING, INACTIVE }
+```
+
+Status transitions are enforced by the write service: a new originator
+defaults to `PENDING` and must be explicitly activated before any
+mapping can reference it.
+
+## Service layer
+
+<AccordionGroup>
+  <Accordion title="LoanOriginatorWritePlatformService">
+    REST-driven CRUD for the originator catalog: create, update,
+    activate, deactivate, delete. Validates external-id uniqueness and
+    prevents deletion of originators that have active mappings.
+  </Accordion>
+  <Accordion title="LoanOriginatorReadPlatformService">
+    Query side. Lists originators with filtering by status and type,
+    and resolves an originator by external ID for the linking flow.
+  </Accordion>
+  <Accordion title="LoanOriginatorLinkingService">
+    The bridge to the loan engine. Implements the
+    `org.apache.fineract.portfolio.loanaccount.service.LoanOriginatorLinkingService`
+    interface (defined in fineract-loan) and gets injected into
+    `LoanWritePlatformServiceJpaRepositoryImpl`. Called once per
+    application submit, once per application modify.
+  </Accordion>
+  <Accordion title="LoanOriginatorHelper">
+    Shared utilities: builds `LoanOriginatorMapping` objects, dedupes
+    by originator ID, walks the JSON array off the loan command.
+  </Accordion>
+</AccordionGroup>
+
+## REST surface
+
+Two API resources sit under `api/`:
+
+| Path | Resource | Use |
+| --- | --- | --- |
+| `/loanoriginators` | `LoanOriginatorsApiResource` | Collection: list, create. |
+| `/loanoriginators/{id}` | `LoanOriginatorApiResource` | Item: read, update, activate, delete. |
+
+Both go through the standard Fineract command framework — writes return
+`CommandProcessingResult` and pass through the audit / authorization
+chain. The Swagger DTOs live in
+`LoanOriginatorApiResourceSwagger` for OpenAPI rendering.
+
+## How originators meet the loan lifecycle
+
+```mermaid
+flowchart LR
+    Client[API client] -->|loan submit with originators[] | LoanWrite[LoanWritePlatformServiceJpa]
+    LoanWrite -->|extract JsonArray| LSvc[LoanOriginatorLinkingService]
+    LSvc --> Repo[(m_loan_originator)]
+    LSvc -->|validate ACTIVE| Helper[LoanOriginatorHelper]
+    Helper -->|persist mapping| Map[(m_loan_originator_mapping)]
+    LSvc --> Enrich[Response enricher adds originator data]
+```
+
+See [Application flow](/origination/application-flow) for the detailed
+step-by-step walk-through of the submit and modify paths.
+
+## Configuration
+
+<ParamField path="fineract.module.loan-origination.enabled" type="boolean" default="false">
+  Toggle the module. When false, the linking service bean is absent and
+  the loan write service silently no-ops on the `originators` payload.
+</ParamField>
+
+<ParamField path="Originator Type code" type="CodeValue">
+  Tenant-managed code values for `originator_type`. Common entries:
+  `BROKER`, `BRANCH_STAFF`, `DIRECT`.
+</ParamField>
+
+<ParamField path="Channel Type code" type="CodeValue">
+  Tenant-managed code values for `channel_type`. Common entries:
+  `ONLINE`, `BRANCH`, `MOBILE`, `PARTNER`.
+</ParamField>
+
+## When to use this module
+
+<Tip>
+  Enable loan origination when you need to:
+  - Pay revenue share to brokers / agents based on loan performance.
+  - Filter portfolios by channel (e.g. mobile vs branch).
+  - Track conversion funnels per originator.
+  - Audit which staff member opened which loan.
+</Tip>
+
+If you don't need any of these, leaving the module disabled keeps the
+loan submit hot path one transaction lighter.
+
+## Related references
+
+<CardGroup cols={2}>
+  <Card title="Application flow" href="/origination/application-flow" icon="route" />
+  <Card title="Loan lifecycle" href="/loan/loan-application-lifecycle" icon="circle-play" />
+  <Card title="Loan product" href="/loan/loan-product" icon="sliders" />
+  <Card title="Code values" href="/core/codes" icon="tags" />
+</CardGroup>
+
+<Note>
+  The module's domain object is named `LoanOriginator` — singular,
+  referring to the party. Don't confuse it with "loan origination" the
+  process; the process lives in `fineract-loan`'s submit / approve /
+  disburse APIs.
+</Note>
+
+## Schema in one glance
+
+| Table | Columns of note | Purpose |
+| --- | --- | --- |
+| `m_loan_originator` | `external_id` (unique), `name`, `status`, `originator_type_cv_id`, `channel_type_cv_id`, audit columns | Originator master |
+| `m_loan_originator_mapping` | `loan_id`, `originator_id`, audit columns | Per-loan attribution |
+| Code value `originator_type` | tenant-managed entries | Originator categorisation |
+| Code value `channel_type` | tenant-managed entries | Channel categorisation |
+
+Foreign keys protect the integrity of the attribution: deleting an
+originator that still has live mappings is rejected by
+`LoanOriginatorCannotBeDeletedException`.
+
+## Exception family
+
+The `exception/` package holds a small but precise set:
+
+| Exception | When it fires |
+| --- | --- |
+| `LoanOriginatorNotFoundException` | Lookup by ID or external ID returned empty |
+| `LoanOriginatorNotActiveException` | Linking a non-ACTIVE originator |
+| `LoanOriginatorDuplicateExternalIdException` | Creating a second originator with the same external ID |
+| `LoanOriginatorMappingNotFoundException` | Removing a mapping that doesn't exist |
+| `LoanOriginatorMappingAlreadyExistsException` | Persisting a duplicate (loan, originator) pair |
+| `LoanOriginatorCannotBeDeletedException` | Deleting an originator with live mappings |
+| `LoanNotInSubmittedStatusException` | Modifying originators after loan approval |
+
+Each maps to a distinct HTTP error code so clients can react
+appropriately — see the [application flow](/origination/application-flow)
+page for the full error surface.
+
+## Sample originator catalog
+
+```json
+[
+  {
+    "name": "Acme Lead Brokers Ltd",
+    "externalId": "ACME-AGENT-001",
+    "originatorTypeId": 31,
+    "channelTypeId": 19,
+    "status": "ACTIVE"
+  },
+  {
+    "name": "Branch Staff — London",
+    "externalId": "BRANCH-LON-STAFF",
+    "originatorTypeId": 32,
+    "channelTypeId": 20,
+    "status": "ACTIVE"
+  },
+  {
+    "name": "Pilot Partner Bank",
+    "externalId": "PARTNER-BANK-1",
+    "originatorTypeId": 33,
+    "channelTypeId": 21,
+    "status": "PENDING"
+  }
+]
+```
+
+Operators typically seed this from their CRM nightly so loan submits
+never trip over a missing originator.

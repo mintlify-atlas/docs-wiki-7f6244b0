@@ -1,0 +1,385 @@
+---
+title: "External event emission flow"
+sidebarTitle: "Event Emission"
+description: "End-to-end trace of an Apache Fineract external event: business code fires a BusinessEvent, the notifier queues it until commit, ExternalEventService writes an outbox row, and the SendAsynchronousEventsTasklet pushes it to JMS / Kafka."
+---
+
+Apache Fineract uses a **transactional outbox** to publish business events. Domain code never talks to a broker directly; instead it fires a typed `BusinessEvent` through `BusinessEventNotifierService`, which either dispatches in-process listeners immediately or — when an external broker is enabled — stores a row in `m_external_event` whose visibility is tied to the surrounding transaction's commit. A scheduled Spring Batch tasklet (`SendAsynchronousEventsTasklet`) then drains the outbox in batches and ships Avro-encoded messages to JMS or Kafka.
+
+This page traces a single event end-to-end against the current sources in `fineract-core/event/...` and `fineract-provider/.../event/external/producer/`.
+
+## The event we follow
+
+We pick `LoanDisbursalBusinessEvent` (`fineract-core/.../event/business/domain/loan/LoanDisbursalBusinessEvent.java`) — fired by `LoanWritePlatformServiceJpaRepositoryImpl.disburseLoan` (`LoanWritePlatformServiceJpaRepositoryImpl.java:516`):
+
+```java
+businessEventNotifierService.notifyPostBusinessEvent(new LoanDisbursalBusinessEvent(loan));
+```
+
+Every other `BusinessEvent` follows the same path; only the Avro schema differs.
+
+## Files involved
+
+| Role | File |
+| --- | --- |
+| Notifier | `fineract-core/src/main/java/org/apache/fineract/infrastructure/event/business/service/BusinessEventNotifierServiceImpl.java` |
+| Listener registry interface | `BusinessEventNotifierService.java` (same package) |
+| Outbox service | `fineract-core/src/main/java/org/apache/fineract/infrastructure/event/external/service/ExternalEventService.java` |
+| Outbox entity | `fineract-core/src/main/java/org/apache/fineract/infrastructure/event/external/repository/domain/ExternalEvent.java` |
+| Outbox repository | `fineract-core/.../repository/ExternalEventRepository.java` |
+| Status enum | `ExternalEventStatus` — `TO_BE_SENT`, `SENT` |
+| Idempotency key | `ExternalEventIdempotencyKeyGenerator` |
+| Avro serializer | `BusinessEventSerializerFactory`, `BusinessEventSerializer` |
+| Sender tasklet | `fineract-core/src/main/java/org/apache/fineract/infrastructure/event/external/jobs/SendAsynchronousEventsTasklet.java` |
+| Producer interface | `fineract-core/src/main/java/org/apache/fineract/infrastructure/event/external/producer/ExternalEventProducer.java` |
+| Producers | `fineract-provider/.../event/external/producer/jms/JmsExternalEventProducer.java` and `kafka/KafkaExternalEventProducer.java:54` |
+| External event configuration | `fineract-core/.../infrastructure/event/external/service/ExternalBusinessEventConfigurationService.java` |
+
+## Why an outbox?
+
+Domain code mutates the loan and posts journal entries inside a `@Transactional` boundary. If we sent the event to the broker mid-transaction we would either:
+
+- send before commit and risk publishing for a transaction that gets rolled back, or
+- send after commit but lose ordering / atomicity guarantees if the broker is slow or down.
+
+Apache Fineract sidesteps both by writing the event as a row in the same transaction as the business mutation. The outbox row is durable, ordered (by `id` ascending), and only visible once the outer transaction commits — at which point a separate, idempotent batch tasklet pushes the message to the broker.
+
+## End-to-end sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Domain as Domain code<br/>(e.g. disburseLoan L516)
+    participant Notifier as BusinessEventNotifierServiceImpl<br/>notifyPostBusinessEvent L88
+    participant PostL as Post-event listeners<br/>(in-process Spring beans)
+    participant CfgSvc as ExternalBusinessEventConfigurationService<br/>isExternalEventConfiguredForPosting
+    participant TxHelper as TransactionHelper
+    participant TLS as ThreadLocal&lt;Stack&lt;List&lt;BusinessEventWithContext&gt;&gt;&gt;
+    participant TX as TransactionExecution (Spring tx)
+    participant Ext as ExternalEventService<br/>postEvent L60
+    participant Idem as ExternalEventIdempotencyKeyGenerator
+    participant Serializer as BusinessEventSerializer<br/>(Avro)
+    participant Enricher as DataEnricherProcessor
+    participant Conv as ByteBufferConverter
+    participant ExRepo as ExternalEventRepository
+    participant JPA as EntityManager
+    participant OutboxDB as m_external_event
+    participant Quartz as Quartz Scheduler
+    participant Launcher as Spring Batch JobLauncher
+    participant Job as SEND_ASYNCHRONOUS_EVENTS job
+    participant Tasklet as SendAsynchronousEventsTasklet<br/>execute L72
+    participant Repo2 as ExternalEventRepository.findByStatusOrderByBusinessDateAscIdAsc
+    participant MsgFactory as MessageFactory<br/>createMessage
+    participant Producer as ExternalEventProducer impl<br/>JmsExternalEventProducer or<br/>KafkaExternalEventProducer L54
+    participant Broker as JMS / Kafka broker
+    participant TxTmpl as TransactionTemplate
+    participant Pool as EVENT_MARKS_AS_SENT_EXECUTOR (ThreadPool)
+
+    rect rgba(220, 240, 255, 0.4)
+        Note over Domain,OutboxDB: Within the original request transaction
+        Domain->>Notifier: notifyPostBusinessEvent(new LoanDisbursalBusinessEvent(loan))
+        Notifier->>Notifier: throwExceptionIfBulkEvent(...) L90
+        Notifier->>Notifier: postListeners = findSuitableListeners(...) L91
+        loop for each registered post-listener
+            Notifier->>PostL: eventListener.onBusinessEvent(event)
+            PostL->>PostL: e.g. update read model, send Mifos notification
+        end
+        Notifier->>Notifier: isExternalEventPostingEnabled() L142
+        alt external events enabled AND event is not NoExternalEvent
+            Notifier->>CfgSvc: isExternalEventConfiguredForPosting(event) L99
+            alt event type enabled in m_external_event_configuration
+                Notifier->>Notifier: isExternalEventRecordingEnabled (Bulk window)
+                alt recording window open
+                    Notifier->>Notifier: recordedEvents.get().add(event) L101
+                else not recording
+                    Notifier->>TxHelper: hasTransaction() L104
+                    alt inside a transaction
+                        Notifier->>TLS: storeTransactionalBusinessEvent(event)<br/>peek().add(BusinessEventWithContext L186-191)
+                        Note over Notifier,TLS: deferred — does NOT write the outbox row yet
+                    else no transaction (rare)
+                        Notifier->>Ext: externalEventService.postEvent(event) L107
+                    end
+                end
+            end
+        end
+        Domain-->>Domain: continues — more mutations, return CommandProcessingResult
+        TX->>Notifier: beforeCommit(transaction) L202<br/>(BusinessEventNotifierServiceImpl is registered as TransactionExecutionListener)
+        Notifier->>TLS: peek list of recorded events
+        loop for each recorded event
+            Notifier->>Ext: externalEventService.postEvent(event) L221
+            Ext->>JPA: entityManager.flush() L66 — make any pending business writes visible to the same DB call
+            Ext->>Idem: generate idempotency key L106
+            Ext->>Serializer: serializerFactory.create(event); toAvroDTO(event) L107-109
+            Ext->>Enricher: dataEnricherProcessor.enrich(avroDto) L109
+            Ext->>Conv: byteBufferConverter.convert(avroDto.toByteBuffer()) L110-111
+            Ext->>Ext: build ExternalEvent(type, category, schema, data, idempotencyKey, aggregateRootId) L115
+            Ext->>ExRepo: repository.save(externalEvent) L73
+            ExRepo->>JPA: persist
+            JPA->>OutboxDB: INSERT m_external_event(id, type, category, schema,<br/>data BLOB, idempotency_key,<br/>aggregate_root_id, status=TO_BE_SENT,<br/>business_date, created_at)
+        end
+        TX->>TX: commit
+        TX->>Notifier: afterCommit / afterRollback → cleanup L226
+    end
+
+    rect rgba(255, 245, 220, 0.4)
+        Note over Quartz,Broker: Asynchronous send via the SEND_ASYNCHRONOUS_EVENTS job
+        Quartz->>Launcher: cron fires for SEND_ASYNCHRONOUS_EVENTS
+        Launcher->>Job: execute
+        Job->>Tasklet: execute(contribution, chunkContext) L72
+        Tasklet->>Tasklet: isDownstreamChannelEnabled? L74<br/>(jms.enabled OR kafka.enabled)
+        Tasklet->>Repo2: findByStatusOrderByBusinessDateAscIdAsc(TO_BE_SENT, PageRequest.ofSize(batch)) L89
+        Repo2->>OutboxDB: SELECT * FROM m_external_event WHERE status='TO_BE_SENT' ORDER BY business_date, id LIMIT batchSize
+        Repo2-->>Tasklet: List<ExternalEventView>
+        Tasklet->>Tasklet: generatePartitions(events) L96<br/>group by aggregate_root_id (preserves per-aggregate ordering)
+        loop for each ExternalEventView in each partition
+            Tasklet->>MsgFactory: createMessage(event) L167
+            MsgFactory-->>Tasklet: MessageV1 (Avro envelope)
+            Tasklet->>Conv: byteBufferConverter.convert(message.toByteBuffer())
+        end
+        Tasklet->>Producer: producer.sendEvents(partitions) L98
+        alt Kafka
+            Producer->>Broker: KafkaTemplate.send(topic, key=aggregateRootId, value=bytes)<br/>blocks until ack or throws AcknowledgementTimeoutException L54
+        else JMS
+            Producer->>Broker: jmsTemplate.send(...) per message
+        end
+        Producer-->>Tasklet: success (or throws)
+        Tasklet->>Tasklet: markEventsAsSent(eventIds) L106
+        Tasklet->>Pool: submit per partition: ThreadLocalContextUtil.init(context)
+        Pool->>TxTmpl: transactionTemplate.execute(...)
+        TxTmpl->>OutboxDB: UPDATE m_external_event SET status='SENT', sent_at=NOW() WHERE id IN (...)
+        Tasklet-->>Job: RepeatStatus.FINISHED
+    end
+```
+
+## Step-by-step
+
+### 1 — Firing the event
+
+Domain code calls `BusinessEventNotifierServiceImpl.notifyPostBusinessEvent(event)` (`BusinessEventNotifierServiceImpl.java:88`):
+
+```java
+@Override
+@Transactional(propagation = Propagation.SUPPORTS)
+public void notifyPostBusinessEvent(BusinessEvent<?> businessEvent) {
+    throwExceptionIfBulkEvent(businessEvent);
+    boolean isExternalEvent = !(businessEvent instanceof NoExternalEvent);
+    List<BusinessEventListener> businessEventListeners = findSuitableListeners(postListeners, businessEvent.getClass());
+    for (BusinessEventListener eventListener : businessEventListeners) {
+        eventListener.onBusinessEvent(businessEvent);
+    }
+    if (isExternalEvent && isExternalEventPostingEnabled()) {
+        if (externalBusinessEventConfigurationService.isExternalEventConfiguredForPosting(businessEvent)) {
+            if (isExternalEventRecordingEnabled()) {
+                recordedEvents.get().add(businessEvent);
+            } else {
+                if (transactionHelper.hasTransaction()) {
+                    storeTransactionalBusinessEvent(businessEvent);
+                } else {
+                    externalEventService.postEvent(businessEvent);
+                }
+            }
+        }
+    }
+}
+```
+
+The branching:
+
+- **Post-listeners always run first** (L91-93). They are synchronous Spring beans that register through `addPostBusinessEventListener(eventType, listener)` (L120) — examples include `LoanDelinquencyChangeListener`, `LoanAccountSnapshotListener`, notification fan-out.
+- **External event posting is gated** by `fineract.events.external.enabled` (`isExternalEventPostingEnabled`, L142).
+- **Per-event configuration** — `ExternalBusinessEventConfigurationService` reads `m_external_event_configuration` to check whether the specific event type is enabled for emission (so operators can throttle bulk events without redeploying).
+- **Bulk recording window** — `startExternalEventRecording()` / `stopExternalEventRecording()` (L153, L159) buffer events into `recordedEvents` and later emit either the singleton or a `BulkBusinessEvent` when the window closes. Used by batch operations that want one aggregated message instead of N small ones.
+- **Transaction-aware deferral** — when a transaction is active (the normal case in the request thread), the event is **not** sent to `ExternalEventService` immediately. Instead it is pushed onto a `Stack<List<BusinessEventWithContext>>` thread-local (`storeTransactionalBusinessEvent`, L186):
+
+```java
+private void storeTransactionalBusinessEvent(BusinessEvent<?> businessEvent) {
+    List<BusinessEventWithContext> businessEvents = transactionBusinessEvents.get().peek();
+    FineractContext fineractContext = ThreadLocalContextUtil.getContext();
+    businessEvents.add(new BusinessEventWithContext(businessEvent, fineractContext));
+}
+```
+
+The `BusinessEventWithContext` captures the current `FineractContext` (tenant, business date, user) so that when the event is finally serialized at commit time it sees the same context even if the commit listener runs in a different thread.
+
+### 2 — Commit-time flush
+
+`BusinessEventNotifierServiceImpl` implements `TransactionExecutionListener`. Spring calls `beforeCommit(transaction)` (L202) once per transaction:
+
+```java
+public void beforeCommit(@NonNull final TransactionExecution transaction) {
+    final List<BusinessEventWithContext> businessEventWithContexts = transactionBusinessEvents.get().peek();
+    if (businessEventWithContexts.isEmpty()) {
+        return;
+    }
+    final FineractContext originalContext = ThreadLocalContextUtil.getContext();
+    businessEventWithContexts.forEach(businessEventWithContext -> {
+        final FineractContext currentContext = businessEventWithContext.getFineractContext();
+        boolean swappedContext = false;
+        try {
+            if (!originalContext.equals(currentContext)) {
+                swappedContext = true;
+                ThreadLocalContextUtil.init(currentContext);
+            }
+            externalEventService.postEvent(businessEventWithContext.getEvent());
+        } finally {
+            if (swappedContext) {
+                ThreadLocalContextUtil.init(originalContext);
+            }
+        }
+    });
+}
+```
+
+Each buffered event is now serialized **inside the same transaction** that is about to commit. If serialization fails or the row insert fails, the whole transaction rolls back and the business mutation reverts with it — preserving the atomic-with-domain-write guarantee.
+
+`afterCommit` / `afterRollback` (L222, L226) pop the stack via `cleanup()` (L191) so a new transaction starts with an empty event list.
+
+### 3 — Writing the outbox row
+
+`ExternalEventService.postEvent(event)` (`ExternalEventService.java:60`):
+
+```java
+public <T> void postEvent(BusinessEvent<T> event) {
+    ...
+    try {
+        entityManager.flush();
+        ExternalEvent externalEvent;
+        if (event instanceof BulkBusinessEvent) {
+            externalEvent = handleBulkBusinessEvent((BulkBusinessEvent) event);
+        } else {
+            externalEvent = handleRegularBusinessEvent(event);
+        }
+        repository.save(externalEvent);
+        ...
+    } catch (IOException e) {
+        throw new RuntimeException("Error while serializing event " + event.getClass().getSimpleName(), e);
+    }
+}
+```
+
+`handleRegularBusinessEvent` (L104):
+
+```java
+String eventType = event.getType();
+String eventCategory = event.getCategory();
+String idempotencyKey = idempotencyKeyGenerator.generate(event);
+BusinessEventSerializer serializer = serializerFactory.create(event);
+String schema = serializer.getSupportedSchema().getName();
+ByteBufferSerializable avroDto = dataEnricherProcessor.enrich(serializer.toAvroDTO(event));
+ByteBuffer buffer = avroDto.toByteBuffer();
+byte[] data = byteBufferConverter.convert(buffer);
+Long aggregateRootId = event.getAggregateRootId();
+return new ExternalEvent(eventType, eventCategory, schema, data, idempotencyKey, aggregateRootId);
+```
+
+The Avro schema name (e.g. `LoanDisbursalDataV1`) is stored alongside the bytes so the consumer can validate the payload without inspecting it. `aggregateRootId` is the loan id (or savings id, etc.) and is later used by the sender tasklet to partition by aggregate root, preserving per-loan ordering.
+
+The `repository.save(externalEvent)` insert writes `status = TO_BE_SENT` and `business_date = ThreadLocalContextUtil.getBusinessDateByType(BUSINESS_DATE)`.
+
+`entityManager.flush()` at the top of `postEvent` (L66) ensures any pending domain writes are visible to the same DB roundtrip — important because the very next save is the outbox row and we want a deterministic order.
+
+### 4 — The scheduled sender
+
+`SendAsynchronousEventsTasklet.execute` (`SendAsynchronousEventsTasklet.java:72`):
+
+```java
+public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) {
+    try {
+        if (isDownstreamChannelEnabled()) {
+            List<ExternalEventView> events = getQueuedEventsBatch();
+            log.debug("Queued events size: {}", events.size());
+            sendEvents(events);
+        }
+    } catch (Exception e) {
+        log.error("Error occurred while processing events: ", e);
+    }
+    return RepeatStatus.FINISHED;
+}
+```
+
+`isDownstreamChannelEnabled` (L84):
+
+```java
+return fineractProperties.getEvents().getExternal().getProducer().getJms().isEnabled()
+        || fineractProperties.getEvents().getExternal().getProducer().getKafka().isEnabled();
+```
+
+`getQueuedEventsBatch` (L88-93) reads `findByStatusOrderByBusinessDateAscIdAsc(TO_BE_SENT, PageRequest.ofSize(batch))`. Batch size is `configurationDomainService.retrieveExternalEventBatchSize()` (L184) — operator-tunable from the configuration dashboard.
+
+### 5 — Partitioning by aggregate root
+
+`generatePartitions(queuedEvents)` (L148) groups events by `aggregate_root_id` so that all events for the same loan (or savings, or client) stay together on the wire. For Kafka this maps directly to message key: the producer uses `aggregateRootId` as the key so the broker hashes the same loan's events to the same partition, preserving per-loan order even with multiple consumers.
+
+`createMessages(events)` (L164) wraps each `ExternalEventView` in an Avro `MessageV1` envelope:
+
+```java
+MessageV1 message = messageFactory.createMessage(event);
+ByteBuffer toByteBuffer = message.toByteBuffer();
+byte[] convert = byteBufferConverter.convert(toByteBuffer);
+```
+
+### 6 — Producer dispatch
+
+`eventProducer.sendEvents(partitions)` (L98) is the only place an actual broker call happens. The producer interface is:
+
+```java
+public interface ExternalEventProducer {
+    void sendEvents(Map<Long, List<byte[]>> partitions) throws AcknowledgementTimeoutException;
+}
+```
+*(`ExternalEventProducer.java:25-34`)*
+
+Two implementations ship with Apache Fineract:
+
+- `KafkaExternalEventProducer.sendEvents` (`KafkaExternalEventProducer.java:54`) — publishes via `KafkaTemplate`, blocking on the broker ack up to a configured timeout. Aggregate id is the partition key.
+- `JmsExternalEventProducer` — publishes via `JmsTemplate` to an ActiveMQ destination.
+
+A `Conditional` on the producer beans (gated by `fineract.events.external.producer.jms.enabled` / `kafka.enabled`) selects which one is active at startup. Both throw `AcknowledgementTimeoutException` on failure so the tasklet leaves the rows in `TO_BE_SENT` and the next scheduled run retries them.
+
+### 7 — Marking events as sent
+
+After a successful broker call, `markEventsAsSent(eventIds)` (L106) updates the outbox in chunks bounded by `events.external.partitionSize` to avoid hitting the JDBC `PreparedStatement` parameter limit:
+
+```java
+final int partitionSize = fineractProperties.getEvents().getExternal().getPartitionSize();
+List<List<Long>> partitions = Lists.partition(eventIds, partitionSize);
+List<Future<?>> tasks = new ArrayList<>();
+final FineractContext context = ThreadLocalContextUtil.getContext();
+partitions.forEach(partitionedEventIds -> {
+    tasks.add(threadPoolTaskExecutor.submit(() -> {
+        try {
+            ThreadLocalContextUtil.init(context);
+            transactionTemplate.execute((status) -> {
+                repository.markEventsSent(partitionedEventIds, sentAt);
+                return null;
+            });
+        } finally {
+            ThreadLocalContextUtil.reset();
+        }
+    }));
+});
+```
+*(`SendAsynchronousEventsTasklet.java:108-128`)*
+
+Each partition runs in its own thread (the `EVENT_MARKS_AS_SENT_EXECUTOR` pool, qualified at L69) and its own short transaction, so a large batch of `UPDATE` statements does not hold a single transaction open. The `Future.get()` loop after L130 waits for all updates to finish before the tasklet returns.
+
+`markEventsSent` runs a `UPDATE m_external_event SET status='SENT', sent_at=:sentAt WHERE id IN (...)`.
+
+## Guarantees and edge cases
+
+- **At-least-once delivery** — A row stays `TO_BE_SENT` until the producer call succeeds **and** the `UPDATE` to mark it `SENT` commits. If the JVM is killed between broker ack and update commit, the next run re-sends. Idempotency at the consumer must rely on `idempotency_key` stored in the message envelope.
+- **Per-aggregate ordering** — Ensured by sorting `ORDER BY business_date ASC, id ASC` (L89) and by partitioning by `aggregateRootId` before sending (L148).
+- **Backpressure** — Batch size and partition size are operator-tunable. The Kafka producer can be configured to wait for `acks=all`.
+- **Rollback safety** — Because the outbox row is written in the same DB transaction as the business mutation, a domain rollback also rolls back the event row. The broker never sees an event whose business effect was reverted.
+- **`NoExternalEvent` events** — events that should run only in-process and never be emitted externally are marked with the `NoExternalEvent` marker interface; `notifyPostBusinessEvent` (L92) checks `isExternalEvent = !(businessEvent instanceof NoExternalEvent)`.
+- **Configured-off events** — when `m_external_event_configuration.<type>.enabled = false`, `ExternalBusinessEventConfigurationService.isExternalEventConfiguredForPosting` returns false and no outbox row is written even when external events are globally enabled. Useful for muting noisy events without a redeploy.
+- **No transaction context** — for the rare case where `notifyPostBusinessEvent` is called outside a transaction (e.g. from a tasklet that did not open one), the event is posted immediately to `ExternalEventService` (L107).
+
+## Related pages
+
+- `events/overview` and `events/external-events-pipeline` — the bigger picture.
+- `events/avro-schemas` — schema names and shapes for each event type.
+- `events/external-event-configuration` — operator-side toggles.
+- `events/event-producers` — JMS vs Kafka producer details.
+- [Command execution flow](/flows/command-execution-flow) — where most events originate.
+- [Loan disburse flow](/flows/loan-disburse-flow) — the concrete event source used in the diagram.

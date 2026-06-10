@@ -1,0 +1,334 @@
+---
+title: "Command Framework Overview in Fineract"
+sidebarTitle: "Overview"
+description: "Tour of the Fineract command framework: how HTTP requests become CommandWrapper, CommandSource, and dispatch through CommandHandlerProvider to handlers."
+---
+
+Every non-read write in Fineract flows through a single, auditable pipeline called the **command framework**. The framework turns an HTTP request into a serialisable `CommandWrapper`, persists a `CommandSource` row that records who asked for what, looks up a Spring bean annotated with `@CommandType(entity, action)`, and finally delegates execution to a `NewCommandSourceHandler`. The pipeline is the backbone of audit, maker-checker (four-eye) approval, idempotency, and asynchronous execution: switching from synchronous JPA dispatch to LMAX Disruptor or `CompletableFuture` execution is a starter-module decision, not a rewrite.
+
+This page draws the end-to-end picture. The following pages drill into each stage — `CommandSource` and `CommandWrapper`, the handler annotation contract, the `CommandHandlerProvider` registry, the maker-checker API, audit search, and the optional `fineract-command-*` modules that re-implement the same pipeline as composable Spring Boot starters.
+
+<Info>
+  All source quoted here comes from `apache/fineract` at the tip of `develop`. Paths
+  begin with `fineract-core/`, `fineract-provider/`, or one of the modular
+  `fineract-command*/` projects.
+</Info>
+
+## Where the framework lives
+
+The classical command framework — the one that has shipped since the original Mifos X codebase — is split across two Gradle subprojects:
+
+| Subproject | Package | Responsibility |
+| --- | --- | --- |
+| `fineract-core` | `org.apache.fineract.commands.annotation` | `@CommandType` marker used to register handlers. |
+| `fineract-core` | `org.apache.fineract.commands.domain` | Persistent `CommandSource` entity, `CommandWrapper` DTO, `CommandProcessingResultType` enum, `CommandSourceRepository`. |
+| `fineract-core` | `org.apache.fineract.commands.exception` | `CommandNotFoundException`, `CommandNotAwaitingApprovalException`, `UnsupportedCommandException`, `RollbackTransactionNotApprovedException`, `CommandResultPersistenceException`. |
+| `fineract-core` | `org.apache.fineract.commands.handler` | `NewCommandSourceHandler` interface. |
+| `fineract-core` | `org.apache.fineract.commands.provider` | `CommandHandlerProvider` — the Spring-backed entity+action registry. |
+| `fineract-core` | `org.apache.fineract.commands.service` | `CommandProcessingService`, `SynchronousCommandProcessingService`, `CommandSourceService`, `CommandWrapperBuilder`, `IdempotencyKeyGenerator`, `IdempotencyKeyResolver`, `PortfolioCommandSourceWritePlatformService`. |
+| `fineract-core` | `org.apache.fineract.commands.jobs` | Spring Batch tasklet that purges processed commands. |
+| `fineract-core` | `org.apache.fineract.commands.configuration` | `RetryConfigurationAssembler` for resilience4j-backed retries. |
+| `fineract-provider` | `org.apache.fineract.commands.api` | `MakercheckersApiResource`, `AuditsApiResource`, Swagger DTOs. |
+| `fineract-provider` | `org.apache.fineract.commands.data` | `AuditData`, `AuditSearchData`, `ProcessingResultLookup`, request beans. |
+| `fineract-provider` | `org.apache.fineract.commands.service` | `AuditReadPlatformService` / `Impl` — JDBC-backed audit search. |
+| `fineract-provider` | `org.apache.fineract.commands.starter` | `CommandsConfiguration` — `@Configuration` that wires the read service. |
+
+Side-by-side with this classical pipeline, the repository carries a second, opt-in command stack: a family of `fineract-command-*` Spring Boot starters that share a small core API (`org.apache.fineract.command.core`) and let an operator pick a transport (sync, async, Disruptor) and a sink (in-memory, JDBC).
+
+## The synchronous flow, step by step
+
+A typical "disburse loan" call to `POST /loans/123?command=disburse` exercises the entire pipeline. The hops below are stripped down to the methods that matter.
+
+<Steps>
+  <Step title="ApiResource builds a CommandWrapper">
+    A JAX-RS resource (for example `LoansApiResource`) parses the request body and
+    delegates to a `CommandWrapperBuilder` to produce an immutable `CommandWrapper`.
+    The wrapper carries `actionName` (`DISBURSE`), `entityName` (`LOAN`), the JSON
+    payload, the resource id, and optional context like `clientId` and `groupId`.
+  </Step>
+  <Step title="PortfolioCommandSourceWritePlatformService validates and forwards">
+    The resource calls `PortfolioCommandSourceWritePlatformService#logCommandSource`.
+    That service authenticates the user, checks the per-task permission
+    `DISBURSE_LOAN`, parses the JSON into a `JsonCommand`, and delegates to
+    `SynchronousCommandProcessingService#executeCommand`.
+  </Step>
+  <Step title="SynchronousCommandProcessingService persists the audit row">
+    The processing service resolves an idempotency key (header value, request
+    attribute, or a freshly generated UUID), stores an initial `CommandSource`
+    row with `status = UNDER_PROCESSING`, and reads the
+    `Idempotency-Key` header through `IdempotencyKeyResolver`.
+  </Step>
+  <Step title="CommandHandlerProvider looks up the handler">
+    The dispatcher asks `CommandHandlerProvider.getHandler("LOAN", "DISBURSE")`. The
+    provider keys its registry by `entity + "|" + action` and looks up the Spring
+    bean previously discovered via `@CommandType`.
+  </Step>
+  <Step title="The handler executes the command">
+    The selected `NewCommandSourceHandler` (here
+    `DisburseLoanCommandHandler`) calls a domain write platform service inside a
+    `@Transactional` boundary and returns a `CommandProcessingResult`.
+  </Step>
+  <Step title="The processor updates the audit row and replies">
+    On success the row is updated to `PROCESSED` with the resource id and
+    JSON-serialised result. On `RollbackTransactionNotApprovedException` it stays
+    at `AWAITING_APPROVAL`. On any other throwable it lands in `ERROR` and the
+    exception is rethrown to the JAX-RS layer.
+  </Step>
+</Steps>
+
+The class diagram below summarises the moving parts. Arrows indicate "calls".
+
+```text
+HTTP request
+   │
+   ▼
+JAX-RS *ApiResource (e.g. LoansApiResource)
+   │  builds via CommandWrapperBuilder
+   ▼
+CommandWrapper ──► JsonCommand
+   │
+   ▼
+PortfolioCommandSourceWritePlatformService
+   │  authenticatedUser().validateHasPermissionTo()
+   ▼
+SynchronousCommandProcessingService
+   │  IdempotencyKeyResolver.resolve()
+   │  CommandSourceService.saveInitial(…)        ── inserts m_portfolio_command_source row
+   ▼
+CommandHandlerProvider.getHandler(entity, action)
+   │
+   ▼
+NewCommandSourceHandler (annotated @CommandType)
+   │
+   ▼
+*WritePlatformService (domain logic) ── returns CommandProcessingResult
+   │
+   ▼
+CommandSourceService.saveResult(…)              ── updates row to PROCESSED / ERROR
+   │
+   ▼
+HTTP response (JSON-serialised CommandProcessingResult)
+```
+
+## CommandWrapper — the in-memory request
+
+`CommandWrapper` is an immutable holder for everything the framework needs to dispatch a command. Production code builds it through `CommandWrapperBuilder` (in `org.apache.fineract.commands.service`); the helpers `wrap(...)` and `fromExistingCommand(...)` cover the two common construction paths:
+
+```java
+public class CommandWrapper {
+
+    private final Long commandId;
+    private final Long officeId;
+    private final Long groupId;
+    private final Long clientId;
+    private final Long loanId;
+    private final Long savingsId;
+    private final String actionName;
+    private final String entityName;
+    private final String taskPermissionName;
+    private final Long entityId;
+    private final Long subentityId;
+    private final String href;
+    private final String json;
+    private final String transactionId;
+    private final Long productId;
+    private final Long creditBureauId;
+    private final Long organisationCreditBureauId;
+    private final String jobName;
+    private final ExternalId loanExternalId;
+    private final Set<String> sanitizeJsonKeys;
+
+    private final String idempotencyKey;
+    private Long templateId;
+
+    public static CommandWrapper wrap(final String actionName, final String entityName,
+            final Long resourceId, final Long subresourceId) {
+        return new CommandWrapper(null, actionName, entityName, resourceId, subresourceId, null, null);
+    }
+}
+```
+
+`taskPermissionName` is derived as `actionName + "_" + entityName` — the same convention used by `m_permission`, so the permission rows the bootstrap migrations seed line up exactly with command names. A wrapper with `actionName = "DISBURSE"`, `entityName = "LOAN"` requires the `DISBURSE_LOAN` permission.
+
+## CommandSource — the persistent audit row
+
+Each command leaves a row in `m_portfolio_command_source`. The JPA entity (`org.apache.fineract.commands.domain.CommandSource`) tracks the maker, an optional checker, status, the resource and sub-resource ids and external ids, the result JSON, an idempotency key, and the client IP. Snippet:
+
+```java
+@Entity
+@Table(name = "m_portfolio_command_source")
+public class CommandSource extends AbstractPersistableCustom<Long> {
+
+    @Column(name = "action_name", length = 100) private String actionName;
+    @Column(name = "entity_name", length = 100) private String entityName;
+    @Column(name = "made_on_date_utc", nullable = false) private OffsetDateTime madeOnDate;
+    @Column(name = "checked_on_date_utc")             private OffsetDateTime checkedOnDate;
+    @Column(name = "status", nullable = false)        private Integer status;
+    @Column(name = "idempotency_key", length = 50)    private String idempotencyKey;
+    @Column(name = "result")                          private String result;
+    @Column(name = "result_status_code")              private Integer resultStatusCode;
+    @Column(name = "client_ip")                       private String clientIp;
+    @Column(name = "is_sanitized", nullable = false)  private boolean sanitized;
+}
+```
+
+Status values come from `CommandProcessingResultType`:
+
+| Value | Enum constant | Meaning |
+| ----- | ------------- | ------- |
+| 0 | `INVALID` | Default / unknown. |
+| 1 | `PROCESSED` | Handler ran successfully and was committed. |
+| 2 | `AWAITING_APPROVAL` | Maker submitted; checker still required. |
+| 3 | `REJECTED` | Checker rejected the entry. |
+| 4 | `UNDER_PROCESSING` | Initial row inserted; handler not yet finished. Acts as the idempotency lock. |
+| 5 | `ERROR` | Handler threw; result and status code carry the error response. |
+
+Page [`commands/command-source`](/commands/command-source) walks through every column.
+
+## Handler contract — `NewCommandSourceHandler`
+
+A handler is a plain Spring bean that implements the single-method interface:
+
+```java
+public interface NewCommandSourceHandler {
+
+    CommandProcessingResult processCommand(JsonCommand command);
+}
+```
+
+To register a handler the implementer adds `@CommandType(entity = "LOAN", action = "DISBURSE")` to the class. The annotation is consumed by `CommandHandlerProvider` at bean-discovery time:
+
+```java
+@Service
+@CommandType(entity = "LOAN", action = "DISBURSE")
+@RequiredArgsConstructor
+public class DisburseLoanCommandHandler implements NewCommandSourceHandler {
+
+    private final LoanWritePlatformService writePlatformService;
+
+    @Override
+    @Transactional
+    public CommandProcessingResult processCommand(final JsonCommand command) {
+        return writePlatformService.disburseLoan(command.entityId(), command, /* … */);
+    }
+}
+```
+
+The provider builds its registry once at startup:
+
+```java
+final String[] commandHandlerBeans = applicationContext.getBeanNamesForAnnotation(CommandType.class);
+for (final String commandHandlerName : commandHandlerBeans) {
+    final CommandType commandType = applicationContext.findAnnotationOnBean(commandHandlerName, CommandType.class);
+    registeredHandlers.put(commandType.entity() + "|" + commandType.action(), commandHandlerName);
+}
+```
+
+Pages [`commands/command-handlers`](/commands/command-handlers) and [`commands/command-provider`](/commands/command-provider) cover handler authoring and the provider in depth.
+
+## CommandSourceService — two-phase write
+
+`CommandSourceService` enforces a two-phase write so an in-flight retry can detect a duplicate request. The class declaration explicitly notes the contract:
+
+```java
+/**
+ * Two phase transactional command processing: save initial...work...finish/failed
+ * to handle idempotent requests.
+ */
+@Component
+@RequiredArgsConstructor
+public class CommandSourceService {
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW, isolation = Isolation.REPEATABLE_READ)
+    public CommandSource saveInitialNewTransaction(CommandWrapper wrapper, JsonCommand jsonCommand,
+            AppUser maker, String idempotencyKey) {
+        return saveInitial(wrapper, jsonCommand, maker, idempotencyKey);
+    }
+}
+```
+
+The initial save sets `status = UNDER_PROCESSING` and inserts with a unique `(action_name, entity_name, idempotency_key)` constraint. A second concurrent request with the same key lands the unique-constraint violation, which is caught and rethrown as `IdempotentCommandProcessUnderProcessingException`:
+
+```java
+} catch (JpaSystemException jse) {
+    final String message = (jse.getRootCause() != null) ? jse.getRootCause().getMessage() : null;
+    if (message != null && message.toUpperCase(Locale.ROOT).contains("UNIQUE_PORTFOLIO_COMMAND_SOURCE")) {
+        throw new IdempotentCommandProcessUnderProcessingException(wrapper, idempotencyKey, jse);
+    }
+    throw jse;
+}
+```
+
+The exception family is described in [`commands/idempotency`](/commands/idempotency).
+
+## Maker-checker, succinctly
+
+If the configuration `isMakerCheckerEnabledForTask(permission)` is true (or the handler returned `rollbackTransaction = true`), the processor calls `commandSource.markAsAwaitingApproval()` and throws `RollbackTransactionNotApprovedException`. The pending row is then returned by `GET /makercheckers`. A checker invokes `POST /makercheckers/{id}?command=approve` (or `reject`, or `DELETE`), which re-enters the framework with `isApprovedByChecker = true`:
+
+```java
+if (isMakerChecker || result.isRollbackTransaction()) {
+    if (isApprovedByChecker || user.isCheckerSuperUser()) {
+        commandSource.markAsChecked(user);
+    } else {
+        commandSource.markAsAwaitingApproval();
+        throw new RollbackTransactionNotApprovedException(commandSource.getId(), commandSource.getResourceId());
+    }
+}
+```
+
+Page [`commands/makercheckers`](/commands/makercheckers) covers the approve/reject/delete API and permissions.
+
+## Audits
+
+Every entry, whether maker-checker-locked or directly processed, becomes an audit row. `AuditsApiResource` exposes a paginated, filterable read API backed by `AuditReadPlatformServiceImpl`. The wrap-up is in [`commands/audits`](/commands/audits).
+
+## Optional execution modules
+
+The classical pipeline always runs synchronously inside the request thread. For higher throughput Fineract ships a family of opt-in starters that share the same `Command` value-object and `CommandHandler` abstraction but vary in transport:
+
+| Module | Headline class | What it adds |
+| ------ | -------------- | ------------ |
+| `fineract-command` | `SynchronousCommandDispatcher`, `DefaultCommandHandlerManager`, `DefaultCommandHookManager` | Core API — `Command`, `CommandHandler`, `CommandStore`, `CommandDispatcher`, `CommandHookBefore/After/Error`. Always present in the second stack. |
+| `fineract-command-test` | `DummyCommand`, `DummyCommandHandler`, `DummyApiController` | Lightweight test fixtures: dummy commands, handlers, and a JAX-RS controller exercised by the integration tests. |
+| `fineract-command-jdbc` | `JdbcCommandStore`, `CommandEntity`, Liquibase `m_command` migrations | Spring Data JDBC-backed implementation of `CommandStore`, with optional file dead-letter queue and resilience4j retries. |
+| `fineract-command-audit` | `AuditCommandHookBefore/After/Error` | Three `@Order(20)` hooks that store the command through `CommandStore` with state `UNDER_PROCESSING`, `PROCESSED`, or `ERROR`. |
+| `fineract-command-async` | `AsyncCommandDispatcher` | Submits each command to `CompletableFuture.supplyAsync` and times out after `fineract.command.async.timeout` (default 3s). |
+| `fineract-command-disruptor` | `DisruptorCommandDispatcher`, `CompleteableCommandEventHandler` | LMAX Disruptor ring buffer (`ringBufferSize` default 1024, `YieldingWaitStrategy`) consumed by a daemon thread. |
+
+Each starter is gated by a `@ConditionalOnProperty` switch (`fineract.command.async.enabled`, `fineract.command.disruptor.enabled`, `fineract.command.jdbc.enabled`, `fineract.command.hooks.audit-*`). Their internals are covered by the following pages:
+
+- [`commands/commands-async`](/commands/commands-async)
+- [`commands/commands-disruptor`](/commands/commands-disruptor)
+- [`commands/commands-jdbc`](/commands/commands-jdbc)
+- [`commands/commands-audit-module`](/commands/commands-audit-module)
+
+## Putting it together: the configuration knobs
+
+Configuration spans three property prefixes:
+
+| Prefix | Module | Highlights |
+| ------ | ------ | ---------- |
+| `fineract.idempotency-key-header-name` | `fineract-provider` | Inbound header name for the classical filter. Default `Idempotency-Key`. |
+| `fineract.command.idempotency-key-header-name` | `fineract-provider` | Same header, exposed for the modular stack. Default `Idempotency-Key`. |
+| `fineract.command.enabled` | `fineract-command` | Master switch for the modular pipeline. Default `true`. |
+| `fineract.command.hooks.*` | `fineract-command-*` | Per-hook toggles: `servlet-header-pre`, `timestamp-pre`, `username-pre`, `audit-pre`, `audit-post`, `audit-error`. |
+| `fineract.command.async.enabled` | `fineract-command-async` | Enables `AsyncCommandDispatcher`. |
+| `fineract.command.async.timeout` | `fineract-command-async` | `Duration` (default `PT3S`). |
+| `fineract.command.disruptor.enabled` | `fineract-command-disruptor` | Enables Disruptor-backed dispatch. |
+| `fineract.command.disruptor.ring-buffer-size` | `fineract-command-disruptor` | Power of two, default `1024`. |
+| `fineract.command.disruptor.producer-type` | `fineract-command-disruptor` | `SINGLE` or `MULTI`. |
+| `fineract.command.jdbc.enabled` | `fineract-command-jdbc` | Enables `JdbcCommandStore`. |
+| `fineract.command.jdbc.file-dead-letter-queue-enabled` | `fineract-command-jdbc` | Falls back to file storage if the database write fails. |
+| `fineract.command.jdbc.file-dead-letter-queue-path` | `fineract-command-jdbc` | Default `/tmp/fineract/dlq`. |
+| `fineract.command.audit.enabled` | `fineract-command-audit` | Master switch for the audit-hook starter. |
+
+## What the framework guarantees
+
+- **Single audit row per request.** Every write produces exactly one `m_portfolio_command_source` row, even on retry.
+- **Idempotency by header.** A second request bearing the same `Idempotency-Key`, action, and entity is rejected at the unique-constraint level and the original response is replayed.
+- **Permission enforcement before dispatch.** The wrapper's `taskPermissionName` (`{ACTION}_{ENTITY}`) is checked against the authenticated user before the handler is invoked.
+- **Maker-checker without handler awareness.** Handlers only know about happy-path execution; the checker round-trip is enforced by `CommandSourceService.processCommand`.
+- **Pluggable transport.** Swapping the dispatcher (sync, async, Disruptor) requires no changes to handler classes.
+- **Bounded retention.** A nightly Spring Batch job, `PURGE_PROCESSED_COMMANDS`, deletes `PROCESSED` rows older than the configured threshold via `CommandSourceRepository.deleteOlderEventsWithStatus`.
+
+The remainder of this section unpacks each of those guarantees in source-level detail.

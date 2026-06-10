@@ -1,0 +1,249 @@
+---
+title: "HTTP request lifecycle in Apache Fineract"
+sidebarTitle: "Request Lifecycle"
+description: "End-to-end trace of an HTTP request through Apache Fineract: from the embedded servlet container into Spring Security, the tenant/auth filter chain, the Jersey dispatcher, the JAX-RS resource, the command pipeline, JPA persistence, and back out as a JSON response."
+---
+
+Apache Fineract is a Spring Boot application that combines an embedded servlet container, Spring Security, Jersey (JAX-RS), Spring Data / JPA / EclipseLink, and a custom command dispatcher. To understand any individual feature it helps to know exactly what happens between the TCP connection landing on the container and the JSON response leaving it. This page walks that path end-to-end against the current sources under `fineract-provider/`, `fineract-security/`, and `fineract-core/`.
+
+The trace follows a single write request — `POST /api/v1/loans/123/transactions?command=repayment` — but every step applies to any non-`OPTIONS` request to `/api/**`.
+
+## What we are tracing
+
+| Layer | Class / file |
+| --- | --- |
+| Boot / container | `ServerApplication` (`fineract-provider/src/main/java/org/apache/fineract/ServerApplication.java`) |
+| Jersey config | `JerseyConfig` (`fineract-provider/src/main/java/org/apache/fineract/infrastructure/core/jersey/JerseyConfig.java`) |
+| Spring Security filter chain | `SecurityConfig#filterChain` (`fineract-provider/src/main/java/org/apache/fineract/infrastructure/core/config/SecurityConfig.java:122`) |
+| Tenant / auth filter | `TenantAwareBasicAuthenticationFilter` (`fineract-security/src/main/java/org/apache/fineract/infrastructure/security/filter/TenantAwareBasicAuthenticationFilter.java`) |
+| Idempotency, COB, correlation filters | `IdempotencyStoreFilter`, `LoanCOBApiFilter`, `CorrelationHeaderFilter`, `RequestResponseFilter` |
+| JAX-RS resource | `LoanTransactionsApiResource` (`fineract-provider/src/main/java/org/apache/fineract/portfolio/loanaccount/api/LoanTransactionsApiResource.java`) |
+| Command dispatcher | `PortfolioCommandSourceWritePlatformServiceImpl` + `SynchronousCommandProcessingService` |
+| Domain service | `LoanWritePlatformServiceJpaRepositoryImpl` |
+| Persistence | JPA / EclipseLink + JDBC via the tenant `DataSource` |
+| Response serialization | `ToApiJsonSerializer` |
+
+## High-level pipeline
+
+<Steps>
+  <Step title="Container hands off to Spring DispatcherServlet">
+    The embedded servlet container receives the HTTP request and routes anything under `/api` to the JAX-RS servlet declared by `JerseyConfig` (`@ApplicationPath("/api")`, `fineract-provider/src/main/java/org/apache/fineract/infrastructure/core/jersey/JerseyConfig.java:36`). Before Jersey sees the request, the Spring Security filter chain attached to `/api/**` runs in order.
+  </Step>
+  <Step title="Tenant + basic-auth filter resolves Fineract-Platform-TenantId">
+    `TenantAwareBasicAuthenticationFilter` extracts the `Fineract-Platform-TenantId` header, loads the tenant via `AuthTenantDetailsService`, pins it onto `ThreadLocalContextUtil`, then runs the standard `BasicAuthenticationFilter` super-method to authenticate the user (`fineract-security/src/main/java/org/apache/fineract/infrastructure/security/filter/TenantAwareBasicAuthenticationFilter.java:96`).
+  </Step>
+  <Step title="Correlation, instance-mode, COB, idempotency filters run">
+    `SecurityConfig` registers `CorrelationHeaderFilter`, `FineractInstanceModeApiFilter`, `LoanCOBApiFilter`, and `IdempotencyStoreFilter` in that order after the auth filter (`fineract-provider/src/main/java/org/apache/fineract/infrastructure/core/config/SecurityConfig.java:421-435`). For loan paths, `LoanCOBApiFilter` may trigger inline COB before the resource is reached.
+  </Step>
+  <Step title="Jersey dispatches to the JAX-RS resource">
+    Jersey matches `POST /v1/loans/{loanId}/transactions?command=repayment` to `LoanTransactionsApiResource#executeLoanTransaction` (`fineract-provider/src/main/java/org/apache/fineract/portfolio/loanaccount/api/LoanTransactionsApiResource.java:296`), which delegates to `executeTransaction()` at line 550.
+  </Step>
+  <Step title="Resource builds a CommandWrapper and calls the dispatcher">
+    The resource composes a `CommandWrapper` via `CommandWrapperBuilder#loanRepaymentTransaction` (`fineract-core/src/main/java/org/apache/fineract/commands/service/CommandWrapperBuilder.java:1208`) and hands it to `PortfolioCommandSourceWritePlatformServiceImpl#logCommandSource` (line 611 of the resource).
+  </Step>
+  <Step title="Dispatcher persists CommandSource and calls the @CommandType handler">
+    `SynchronousCommandProcessingService#executeCommand` resolves the idempotency key, persists a `CommandSource`, looks up the `@CommandType(entity="LOAN", action="REPAYMENT")` handler (`LoanRepaymentCommandHandler`), and calls it inside a transaction.
+  </Step>
+  <Step title="Domain service writes via JPA, posts journal entries, emits events">
+    `LoanWritePlatformServiceJpaRepositoryImpl#makeLoanRepayment` (`fineract-provider/src/main/java/org/apache/fineract/portfolio/loanaccount/service/LoanWritePlatformServiceJpaRepositoryImpl.java:961`) mutates the aggregate, calls JPA via EclipseLink, posts GL entries, and fires business events.
+  </Step>
+  <Step title="Response is serialized; transaction commits; webhook hook fires">
+    `ToApiJsonSerializer.serializeResult` formats the `CommandProcessingResult` as JSON, the surrounding `@Transactional` commits, and `SynchronousCommandProcessingService#publishHookEvent` is fired (`fineract-core/src/main/java/org/apache/fineract/commands/service/SynchronousCommandProcessingService.java:183-217`).
+  </Step>
+</Steps>
+
+## End-to-end sequence diagram
+
+The diagram below traces a single `POST /api/v1/loans/123/transactions?command=repayment` request from socket-accept all the way back to the wire. Every arrow corresponds to a real call site in the source; line numbers are inline.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant Container as Embedded Servlet Container
+    participant SecChain as Spring Security FilterChain<br/>SecurityConfig#filterChain L122
+    participant TenantF as TenantAwareBasicAuthenticationFilter<br/>doFilterInternal L96
+    participant Auth as AuthenticationManager / DaoAuthenticationProvider
+    participant TenantSvc as AuthTenantDetailsService<br/>loadTenantById
+    participant TLC as ThreadLocalContextUtil
+    participant CorrF as CorrelationHeaderFilter
+    participant InstF as FineractInstanceModeApiFilter
+    participant COBF as LoanCOBApiFilter<br/>COBApiFilter#doFilterInternal
+    participant IdemF as IdempotencyStoreFilter
+    participant Jersey as Jersey ResourceConfig<br/>JerseyConfig L36
+    participant Resource as LoanTransactionsApiResource<br/>executeLoanTransaction L296
+    participant Builder as CommandWrapperBuilder<br/>loanRepaymentTransaction L1208
+    participant Portfolio as PortfolioCommandSourceWritePlatformServiceImpl<br/>logCommandSource
+    participant Sync as SynchronousCommandProcessingService<br/>executeCommand L91
+    participant Provider as CommandHandlerProvider<br/>getHandler L88
+    participant Handler as LoanRepaymentCommandHandler<br/>processCommand L43
+    participant CSS as CommandSourceService<br/>processCommand L143
+    participant Write as LoanWritePlatformServiceJpaRepositoryImpl<br/>makeLoanRepayment L961
+    participant JPA as EntityManager / EclipseLink
+    participant DB as Tenant DataSource (JDBC)
+    participant GL as LoanJournalEntryPoster
+    participant Bus as BusinessEventNotifierService
+    participant Hook as Hook / Webhook publisher
+    participant Ser as ToApiJsonSerializer
+
+    Client->>Container: POST /api/v1/loans/123/transactions?command=repayment<br/>Authorization: Basic ...<br/>Fineract-Platform-TenantId: default
+    Container->>SecChain: dispatch HTTP request matched by /api/**
+    SecChain->>TenantF: addFilterBefore tenantAwareBasicAuthenticationFilter L421
+    TenantF->>TLC: ThreadLocalContextUtil.reset() L99
+    TenantF->>TenantSvc: loadTenantById("default", false) L129
+    TenantSvc-->>TenantF: FineractPlatformTenant
+    TenantF->>TLC: setTenant(tenant) L130
+    TenantF->>TLC: setBusinessDates(businessDates) L132
+    TenantF->>TLC: setAuthToken(basic header) L137
+    TenantF->>Auth: super.doFilterInternal() runs BasicAuthenticationFilter L153
+    Auth->>Auth: DaoAuthenticationProvider.authenticate (BCrypt match)
+    Auth-->>TenantF: Authentication populated in SecurityContext
+    TenantF-->>SecChain: chain.doFilter
+    SecChain->>CorrF: addFilterAfter correlationHeaderFilter L423
+    CorrF->>CorrF: copy X-Correlation-ID into MDC
+    CorrF-->>SecChain: chain.doFilter
+    SecChain->>InstF: addFilterAfter fineractInstanceModeApiFilter L424
+    InstF->>InstF: reject if instance is read-only and method is non-GET
+    InstF-->>SecChain: chain.doFilter
+    SecChain->>COBF: addFilterAfter loanCOBApiFilter L427
+    COBF->>COBF: helper.isOnApiList() L65
+    COBF->>COBF: helper.calculateRelevantLoanIds() L71
+    COBF->>COBF: helper.isLoanBehind() L72 — false here
+    COBF-->>SecChain: chain.doFilter
+    SecChain->>IdemF: addFilterAfter idempotencyStoreFilter L428
+    IdemF->>IdemF: cache request body, mark idempotency hook
+    IdemF-->>SecChain: chain.doFilter
+    SecChain->>Jersey: dispatch to /api Jersey ResourceConfig
+    Jersey->>Resource: match @Path("/v1/loans") + @POST<br/>"{loanId}/transactions" L275
+    Resource->>Resource: executeTransaction(123, null, "repayment", body) L550
+    Resource->>Builder: new CommandWrapperBuilder().withJson(body)
+    Builder->>Builder: loanRepaymentTransaction(123) L1208
+    Resource->>Portfolio: commandsSourceWritePlatformService.logCommandSource(cmd) L611
+    Portfolio->>Portfolio: authenticatedUser + validateHasPermissionTo L67
+    Portfolio->>Portfolio: parse JSON, build JsonCommand L73
+    Portfolio->>Sync: executeCommand(wrapper, command, false) L77
+    Sync->>Sync: retryWrapper(...) L91
+    Sync->>Sync: idempotencyKeyResolver.resolve(wrapper) L115
+    Sync->>CSS: saveInitialNewTransaction(...) L125
+    CSS->>JPA: persist CommandSource row
+    JPA->>DB: INSERT m_portfolio_command_source
+    CSS-->>Sync: managed CommandSource (id)
+    Sync->>Provider: findCommandHandler(wrapper) L138
+    Provider->>Provider: lookup registeredHandlers["LOAN|REPAYMENT"] L88
+    Provider-->>Sync: LoanRepaymentCommandHandler bean
+    Sync->>CSS: processCommand(handler, command, ...) L138
+    CSS->>Handler: handler.processCommand(command) L145
+    Handler->>Write: writePlatformService.makeLoanRepayment(REPAYMENT, loanId, cmd, false) L44
+    Write->>JPA: loanAssembler.assembleFrom(loanId)
+    JPA->>DB: SELECT m_loan, m_loan_repayment_schedule, m_loan_transaction ...
+    Write->>Write: validate; build LoanTransaction
+    Write->>Write: transactionProcessor.processLatestTransaction L992
+    Write->>JPA: save updated schedule installments + new LoanTransaction
+    JPA->>DB: INSERT/UPDATE m_loan_transaction, m_loan_repayment_schedule
+    Write->>GL: journalEntryPoster.postJournalEntriesForLoanTransaction
+    GL->>JPA: persist GL journal entries
+    JPA->>DB: INSERT acc_gl_journal_entry
+    Write->>Bus: notifyPostBusinessEvent(LoanTransactionBusinessEvent)
+    Bus->>Bus: post listeners + queue ExternalEvent row L88-103
+    Write-->>Handler: CommandProcessingResult.builder().build()
+    Handler-->>CSS: result
+    CSS->>CSS: check maker-checker / rollback flag L148
+    CSS-->>Sync: result
+    Sync->>CSS: saveResultInTransaction(commandSource) L186
+    CSS->>JPA: UPDATE m_portfolio_command_source SET status=PROCESSED, result_status_code=200
+    JPA->>DB: UPDATE m_portfolio_command_source
+    Sync->>Hook: publishHookEvent(entity, action, command, result) L217
+    Sync-->>Portfolio: CommandProcessingResult
+    Portfolio-->>Resource: result
+    Resource->>Ser: toApiJsonSerializer.serialize(result) L612
+    Ser-->>Resource: JSON string
+    Resource-->>Jersey: return JSON
+    Jersey-->>SecChain: HTTP entity body
+    SecChain->>IdemF: idempotency post-processing — store result body
+    SecChain->>Container: response committed
+    Container-->>Client: 200 OK + JSON body + X-Notification-Refresh header
+    Note over TenantF: finally { ThreadLocalContextUtil.reset(); }<br/>L161 clears tenant before the thread returns to the pool
+```
+
+## Step-by-step notes
+
+### 1 — Container and entrypoint
+
+The application is launched by `ServerApplication#main` (`fineract-provider/src/main/java/org/apache/fineract/ServerApplication.java`). For `bootRun` / executable JAR launches the embedded container (Tomcat by default; can be swapped to Jetty/Undertow via `spring-boot-starter-jetty`) hosts the same Jersey configuration. For traditional WAR deployments, `SpringBootServletInitializer#configure` wires the same `Configuration` source, so the request path described here is identical regardless of how the WAR is hosted.
+
+### 2 — Spring Security filter chain order
+
+`SecurityConfig#filterChain` (`fineract-provider/src/main/java/org/apache/fineract/infrastructure/core/config/SecurityConfig.java:122`) registers filters around the default Spring Security stack via `addFilterBefore` / `addFilterAfter`. The effective order for `/api/**` is:
+
+1. `TenantAwareBasicAuthenticationFilter` — `addFilterBefore(...SecurityContextHolderFilter.class)` (L421)
+2. `RequestResponseFilter` — `addFilterAfter(...ExceptionTranslationFilter.class)` (L422)
+3. `CorrelationHeaderFilter` — after `RequestResponseFilter` (L423)
+4. `FineractInstanceModeApiFilter` — after `CorrelationHeaderFilter` (L424)
+5. `LoanCOBApiFilter` — after `FineractInstanceModeApiFilter` (L427)
+6. `IdempotencyStoreFilter` — after `LoanCOBApiFilter` (L428)
+7. `ProgressiveLoanModelCheckerFilter` — before `LoanCOBApiFilter` (L429)
+8. Optional `TwoFactorAuthenticationFilter` — after `CorrelationHeaderFilter` when 2FA enabled (L438)
+9. Optional `CallerIpTrackingFilter` (L435)
+
+### 3 — Tenant resolution and authentication
+
+`TenantAwareBasicAuthenticationFilter` (`fineract-security/.../filter/TenantAwareBasicAuthenticationFilter.java:96`) extends Spring's `BasicAuthenticationFilter`. Inside `doFilterInternal` it:
+
+- resets the request-scoped `ThreadLocalContextUtil` (L99),
+- short-circuits `OPTIONS` requests (L101–104) for CORS preflight,
+- pulls `Fineract-Platform-TenantId` from the header — or the `tenantIdentifier` query param as a fallback (L108–114),
+- throws `InvalidTenantIdentifierException` if missing (L116),
+- calls `AuthTenantDetailsService#loadTenantById` to look up the tenant in `fineract_tenants.tenants` and resolve its `tenant_server_connections` row (L129),
+- pins the tenant and business dates onto the thread (L130–132),
+- delegates to the base class `super.doFilterInternal` to validate the `Authorization: Basic ...` header against the tenant-scoped `TenantAwareJpaPlatformUserDetailsService` (L153).
+
+Critically the `finally` block (L161) calls `ThreadLocalContextUtil.reset()` so the worker thread leaves the pool with a clean context.
+
+### 4 — Jersey dispatch and resource binding
+
+`JerseyConfig` (`fineract-provider/src/main/java/org/apache/fineract/infrastructure/core/jersey/JerseyConfig.java`) is a `ResourceConfig` with `@ApplicationPath("/api")`. At `@PostConstruct` it auto-registers every Spring bean annotated with `@Path` or `@Provider` (L55-58), so all JAX-RS resources defined under `fineract-provider/.../api/` become available without explicit registration.
+
+For our trace, `LoanTransactionsApiResource` (`@Path("/v1/loans")`, L87) matches `POST {loanId}/transactions` (L275). Jersey injects the `@PathParam("loanId")`, `@QueryParam("command")` and request body, then invokes `executeLoanTransaction` (L296), which delegates to the package-private `executeTransaction(loanId, null, "repayment", body)` (L550).
+
+### 5 — From resource to command dispatcher
+
+`executeTransaction` builds a `CommandWrapper` using `CommandWrapperBuilder.loanRepaymentTransaction(resolvedLoanId)` (`fineract-core/src/main/java/org/apache/fineract/commands/service/CommandWrapperBuilder.java:1208`) — that method sets `actionName=REPAYMENT`, `entityName=LOAN`, the `loanId`, and an `href` template — and calls `commandsSourceWritePlatformService.logCommandSource(commandRequest)` (resource L611).
+
+`PortfolioCommandSourceWritePlatformServiceImpl.logCommandSource` (`fineract-core/src/main/java/org/apache/fineract/commands/service/PortfolioCommandSourceWritePlatformServiceImpl.java:57`) checks permissions, parses the JSON body into a `JsonCommand`, and delegates to `SynchronousCommandProcessingService.executeCommand` (L77).
+
+### 6 — Synchronous command processing
+
+`SynchronousCommandProcessingService.executeCommand` (`fineract-core/src/main/java/org/apache/fineract/commands/service/SynchronousCommandProcessingService.java:91`) wraps the work in a Resilience4j retry, resolves the idempotency key, and persists an initial `CommandSource` row via `CommandSourceService.saveInitialNewTransaction` (L125). It then resolves the handler with `findCommandHandler(wrapper)` (L138), which in turn calls `CommandHandlerProvider.getHandler("LOAN", "REPAYMENT")` (`fineract-core/src/main/java/org/apache/fineract/commands/provider/CommandHandlerProvider.java:88`) — backed by the registry built in `initializeHandlerRegistry` (L57) from every Spring bean carrying `@CommandType(entity, action)`.
+
+The handler is invoked inside `CommandSourceService.processCommand` (`fineract-core/src/main/java/org/apache/fineract/commands/service/CommandSourceService.java:143`), where the maker-checker check (`isMakerCheckerEnabledForTask`) decides whether to mark the row as `AWAITING_APPROVAL` and throw `RollbackTransactionNotApprovedException` (L158).
+
+### 7 — Handler → domain service → JDBC
+
+`LoanRepaymentCommandHandler.processCommand` (`fineract-loan/src/main/java/org/apache/fineract/portfolio/loanaccount/handler/LoanRepaymentCommandHandler.java:43`) calls `writePlatformService.makeLoanRepayment(LoanTransactionType.REPAYMENT, command.getLoanId(), command, false)`. The implementation in `LoanWritePlatformServiceJpaRepositoryImpl.makeLoanRepayment` (`fineract-provider/.../service/LoanWritePlatformServiceJpaRepositoryImpl.java:961`) loads the aggregate (`loanAssembler.assembleFrom`), runs validators, builds a `LoanTransaction`, lets `loanTransactionProcessingService.processLatestTransaction` (L992) allocate the amount against installments per strategy, saves transactions, calls `journalEntryPoster.postJournalEntriesForLoanTransaction`, and emits `LoanTransactionBusinessEvent`s through `BusinessEventNotifierService`.
+
+All persistence is JPA via EclipseLink against the tenant-scoped `DataSource` resolved earlier; the actual SQL is the standard `SELECT … FOR UPDATE` / `INSERT` / `UPDATE` traffic of EclipseLink against the tenant's MySQL/MariaDB/PostgreSQL.
+
+### 8 — Result persistence, hook fan-out, response
+
+Back in `SynchronousCommandProcessingService.executeCommand` (L182–204), the result is serialized into the `CommandSource.result` column, the row is flipped to `PROCESSED`, and `publishHookEvent(entity, action, command, result)` fires (L217). The JSON returned by `ToApiJsonSerializer.serialize(result)` (resource L612) is the body the client sees.
+
+`TenantAwareBasicAuthenticationFilter.onSuccessfulAuthentication` (L170–181) adds an `X-Notification-Refresh: true|false` header before the response is written.
+
+## What can interrupt the pipeline
+
+The diagram shows the happy path. Several side channels can short-circuit it:
+
+- **Invalid tenant header** — `InvalidTenantIdentifierException` thrown at L116 is caught at L155 and turned into `400 Bad Request` with a `WWW-Authenticate` header. The chain never reaches Jersey.
+- **Authentication failure** — `BasicAuthenticationFilter` raises `BadCredentialsException`, mapped to `401` by `BasicAuthenticationEntryPoint` (`SecurityConfig.java:496`).
+- **Read-only instance** — `FineractInstanceModeApiFilter` rejects non-GET requests with `InvalidInstanceTypeMethodException`.
+- **Loan locked / behind COB** — `LoanCOBApiFilter` calls `helper.executeInlineCob(loanIds)` when `isLoanBehind(...)` is true, or rejects with `409` when the loan is hard-locked (see the dedicated [Inline COB flow](/flows/inline-cob-flow) page).
+- **Idempotent replay** — when the resolved idempotency key matches a row in `m_portfolio_command_source` with status `PROCESSED`, `SynchronousCommandProcessingService.exceptionWhenTheRequestAlreadyProcessed` (L238–258) throws `IdempotentCommandProcessSucceedException`, and the stored response body is replayed.
+- **Maker-checker** — `CommandSourceService.processCommand` (L148–160) flips the row to `AWAITING_APPROVAL` and throws `RollbackTransactionNotApprovedException`, which the JAX-RS mapper translates to `403`.
+
+## Where to look next
+
+- Command persistence: [Command execution flow](/flows/command-execution-flow)
+- Tenant header + basic auth in detail: [Authentication and tenant resolution flow](/flows/auth-and-tenant-flow)
+- Domain logic for the example used here: [Loan repayment flow](/flows/loan-repayment-flow)
+- COB short-circuit: [Inline COB flow](/flows/inline-cob-flow)
+- Event fan-out: [External event emission flow](/flows/external-event-emission-flow)

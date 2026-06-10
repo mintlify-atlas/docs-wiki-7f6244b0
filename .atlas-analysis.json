@@ -1,24 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Apache Fineract",
+  "projectType": "api-service",
+  "projectName": "Apache Fineract",
+  "projectDescription": "Apache Fineract is an open-source core banking platform built on Spring Boot/Java that powers loans, savings, accounting, and microfinance operations across a multi-tenant, modular Gradle codebase.",
   "theme": "maple",
-  "colors": {
-    "primary": "#c35696",
-    "light": "#1d5e8b",
-    "dark": "#faf6fa"
-  },
-  "favicon": "https://media.brand.dev/cbc27f91-fd3b-452d-89c7-5e7ded5150f3.jpg",
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/apache/fineract"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/apache/fineract"
-    }
-  },
+  "primaryColor": "#c35696",
+  "lightColor": "#1d5e8b",
+  "darkColor": "#faf6fa",
   "navigation": {
     "tabs": [
       {
@@ -136,6 +123,9 @@
               "loan/loan-charges",
               "loan/loan-disbursement",
               "loan/loan-repayment-schedule",
+              "loan/cumulative-schedule-generator",
+              "loan/loan-transaction-processors",
+              "loan/loan-reschedule",
               "loan/loan-officer-assignment",
               "loan/loan-arrears-aging",
               "loan/loan-delinquency",
@@ -143,9 +133,6 @@
               "loan/loan-guarantor",
               "loan/loan-collateral",
               "loan/loan-summary-providers",
-              "loan/cumulative-schedule-generator",
-              "loan/loan-transaction-processors",
-              "loan/loan-reschedule",
               "loan/loan-handlers",
               "loan/loan-jobs",
               "loan/glim",
@@ -220,7 +207,7 @@
             ]
           },
           {
-            "group": "Portfolio \u2013 Clients & Groups",
+            "group": "Portfolio – Clients & Groups",
             "pages": [
               "portfolio/client",
               "portfolio/client-identifiers",
@@ -238,7 +225,7 @@
             ]
           },
           {
-            "group": "Portfolio \u2013 Reference Data",
+            "group": "Portfolio – Reference Data",
             "pages": [
               "reference/charges",
               "reference/funds",
@@ -352,13 +339,14 @@
             "group": "Data & Persistence",
             "pages": [
               "data/overview",
-              "data/jpa-configuration",
-              "data/liquibase-migrations",
-              "data/database-routing",
-              "data/database-dialect-abstraction",
-              "data/jdbc-template-services",
-              "data/audit-fields",
-              "data/connection-pooling"
+              "data/data-source-and-hikari",
+              "data/jpa-eclipselink",
+              "data/liquibase-changelogs",
+              "data/tenant-store-schema",
+              "data/tenant-schema",
+              "data/data-tables",
+              "data/reports",
+              "data/audit-fields"
             ]
           },
           {
@@ -367,41 +355,55 @@
               "models/loan-model",
               "models/loan-product-model",
               "models/savings-model",
-              "models/charges-and-funds-model",
+              "models/share-model",
               "models/accounting-model",
               "models/client-model",
-              "models/user-and-permissions-model",
-              "models/audit-and-commands-model"
+              "models/group-model",
+              "models/office-and-staff-model",
+              "models/charge-tax-rate-model",
+              "models/external-event-model",
+              "models/user-and-role-model"
             ]
           },
           {
             "group": "API Reference",
             "pages": [
               "api/overview",
-              "api/codes-and-reference-api",
-              "api/users-and-permissions-api",
-              "api/organisation-api",
-              "api/cob-and-jobs-api",
-              "api/datatables-and-data-queries-api",
-              "api/external-events-api",
-              "api/notifications-and-templates-api",
-              "batch/batch-api-service"
+              "api/loans",
+              "api/loan-products",
+              "api/savings",
+              "api/fixed-recurring-deposits",
+              "api/clients",
+              "api/groups-centers",
+              "api/journal-entries",
+              "api/gl-accounts",
+              "api/charges",
+              "api/users-roles-permissions",
+              "api/offices-staff",
+              "api/scheduler-jobs",
+              "api/cob-and-locks",
+              "api/datatables-reports",
+              "api/holidays-workingdays",
+              "api/interop",
+              "api/notifications-hooks",
+              "api/spm-surveys",
+              "api/batch-api"
             ]
           },
           {
             "group": "Key Flows",
             "pages": [
               "flows/request-lifecycle",
-              "flows/command-execution-flow",
-              "flows/loan-disburse-flow",
+              "flows/loan-disbursement-flow",
               "flows/loan-repayment-flow",
               "flows/cob-execution-flow",
-              "flows/savings-interest-posting-flow",
-              "flows/auth-and-tenant-flow",
-              "flows/external-event-emission-flow",
               "flows/maker-checker-flow",
-              "flows/inline-cob-flow",
-              "flows/batch-api-flow"
+              "flows/external-event-publishing-flow",
+              "flows/savings-interest-posting-flow",
+              "flows/authentication-flow",
+              "flows/tenant-resolution-flow",
+              "flows/batch-request-flow",
+              "flows/accounting-bridge-flow"
             ]
           },
           {
@@ -410,30 +412,89 @@
               "config/application-properties",
               "config/environment-variables",
               "config/fineract-properties",
-              "config/security-properties",
-              "config/feature-flags-and-modes"
+              "config/global-configuration",
+              "config/external-services",
+              "config/feature-flags",
+              "config/instance-mode-flags"
             ]
           },
           {
             "group": "Build, Test & Deployment",
             "pages": [
-              "build/gradle-layout",
-              "build/docker-image",
-              "build/code-quality",
-              "build/release-process",
-              "build/testing",
-              "build/cucumber-features",
-              "build/dependency-management"
+              "build/gradle-multi-module",
+              "build/docker-compose-matrix",
+              "build/kubernetes",
+              "build/static-weaving",
+              "build/war-packaging",
+              "build/integration-tests",
+              "build/e2e-cucumber-tests",
+              "build/oauth2-twofactor-tests",
+              "build/custom-modules"
             ]
           },
           {
             "group": "Generated Clients",
             "pages": [
-              "clients/fineract-client"
+              "clients/fineract-client",
+              "clients/fineract-client-feign"
             ]
           }
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Modular multi-project Gradle build (40+ subprojects) for a Spring Boot core banking platform",
+    "Multi-tenant runtime with per-tenant DataSource resolution and Liquibase-managed tenant-store/tenant schemas",
+    "Jersey JAX-RS API layer with 111+ ApiResource endpoints exposing loans, savings, accounting, and admin operations",
+    "Command-source / maker-checker framework with handlers, idempotency, and async/disruptor/JDBC variants",
+    "Batch API service that fans out internal command strategies in a single HTTP call",
+    "Cumulative and Progressive loan schedule generators, EMI calculator, and transaction processors",
+    "Close-of-Business (COB) Spring Batch pipeline with pluggable LoanCOB business steps and inline COB",
+    "Scheduled Jobs framework on top of Spring Batch with Quartz-style scheduler + Tasklet/Config per job",
+    "Business-event bus and external-event producer pipeline with Avro schemas and queue/topic adapters",
+    "Accounting subsystem: GL accounts, journal entries, accounting rules, financial activity, provisioning, trial balance",
+    "Savings, Fixed Deposit, Recurring Deposit accounts and GSIM/GLIM individual monitoring",
+    "Share accounts and dividend posting",
+    "Investor / asset-externalization module (loan transfer to investors with dedicated COB steps)",
+    "Working-capital loan module with breach/near-breach detection and dedicated COB pipeline",
+    "Loan origination module covering application workflows",
+    "Document management and pluggable content stores (filesystem and S3)",
+    "Email and SMS campaign engines with messaging gateways and report mailing jobs",
+    "Interoperation API for Mojaloop / open-banking style account lookups and transfers",
+    "Mix XBRL reporting module and SPM (Social Performance Management) surveys and scorecards",
+    "Credit bureau integration framework",
+    "Two-factor authentication and OIDC federation in addition to basic auth and OAuth2",
+    "Hooks framework for webhook delivery to external systems",
+    "Notification cache, in-app notifications, and templates (Mustache)",
+    "Data tables and ad-hoc query engine for tenant-extensible schemas",
+    "Reports module (Pentaho/JasperReports integration) and report mailing jobs",
+    "Generated Java SDK (fineract-client) and Feign variant (fineract-client-feign)",
+    "Avro schema package (fineract-avro-schemas) shared with external consumers",
+    "End-to-end Cucumber test runner (fineract-e2e-tests-runner) with feature catalogue",
+    "Custom-module loader: settings.gradle dynamically includes custom/<company>/<category>/<module>",
+    "Spring Boot war packaging (fineract-war) for legacy servlet-container deploys"
+  ],
+  "publicApiSurface": [
+    "fineract-provider/src/main/java/org/apache/fineract/ServerApplication.java",
+    "fineract-core/src/main/java/org/apache/fineract/infrastructure/core/boot/FineractWebApplicationConfiguration.java",
+    "fineract-provider/src/main/java/org/apache/fineract/portfolio/loanaccount/api/LoansApiResource.java",
+    "fineract-provider/src/main/java/org/apache/fineract/portfolio/loanaccount/api/LoanTransactionsApiResource.java",
+    "fineract-provider/src/main/java/org/apache/fineract/portfolio/loanproduct/api/LoanProductsApiResource.java",
+    "fineract-provider/src/main/java/org/apache/fineract/portfolio/savings/api/SavingsAccountsApiResource.java",
+    "fineract-provider/src/main/java/org/apache/fineract/portfolio/client/api/ClientsApiResource.java",
+    "fineract-provider/src/main/java/org/apache/fineract/portfolio/group/api/GroupsApiResource.java",
+    "fineract-provider/src/main/java/org/apache/fineract/accounting/journalentry/api/JournalEntriesApiResource.java",
+    "fineract-provider/src/main/java/org/apache/fineract/infrastructure/jobs/api/SchedulerJobApiResource.java",
+    "fineract-provider/src/main/java/org/apache/fineract/cob/api/LoanCOBCatchUpApiResource.java",
+    "fineract-provider/src/main/java/org/apache/fineract/commands/api/MakercheckersApiResource.java",
+    "fineract-core/src/main/java/org/apache/fineract/batch/api/BatchApiResource.java",
+    "fineract-loan/src/main/java/org/apache/fineract/portfolio/loanaccount/domain/Loan.java",
+    "fineract-loan/src/main/java/org/apache/fineract/portfolio/loanaccount/loanschedule/domain/LoanScheduleGenerator.java",
+    "fineract-progressive-loan/src/main/java/org/apache/fineract/portfolio/loanproduct/calc/EMICalculator.java",
+    "fineract-cob/src/main/java/org/apache/fineract/cob/COBBusinessStep.java",
+    "fineract-core/src/main/java/org/apache/fineract/infrastructure/event/external/producer/ExternalEventProducer.java",
+    "fineract-provider/src/main/java/org/apache/fineract/interoperation/api/InteropApiResource.java",
+    "fineract-investor/src/main/java/org/apache/fineract/investor/cob/loan/LoanAccountOwnerTransferBusinessStep.java"
+  ]
 }

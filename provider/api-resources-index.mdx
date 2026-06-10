@@ -1,0 +1,535 @@
+---
+title: "ApiResource catalogue"
+sidebarTitle: "API resources index"
+description: "Index of every *ApiResource class shipped by fineract-provider — 111 JAX-RS top-level resources organized by package, each with the file path and the root @Path value declared on the class."
+---
+
+This page is the catalogue of every Jersey resource class that participates in the Fineract REST surface. `JerseyConfig` (see [Jersey bootstrap](/provider/jersey-bootstrap)) does not maintain a hand-curated list — it walks the Spring context after refresh and registers **every** bean annotated `@jakarta.ws.rs.Path`. Adding a class with `@Path` to the classpath (and making it a Spring bean) is enough to put new endpoints on the wire.
+
+The 111 classes below were found by:
+
+```bash
+find fineract-provider/src/main/java -name '*ApiResource.java' | wc -l
+# 111
+```
+
+Every row links to the source file (relative to `fineract-provider/src/main/java/`) and shows the **class-level** `@Path` — that is, the root that all `@GET`/`@POST`/`@PUT`/`@DELETE` methods on the class are nested under. Sub-paths defined on individual methods (e.g. `@Path("{loanId}/charges")`) are not enumerated here; for those, consult the resource class directly or the generated `fineract.json` OpenAPI document.
+
+<Note>
+  The companion `BatchApiResource` (`/v1/batches`) lives in the `fineract-core` module, not in `fineract-provider`. It is still registered through the same `JerseyConfig` because the component scan covers `org.apache.fineract.**`. It is documented here as well because, from the wire perspective, it is a peer of the resources below.
+</Note>
+
+## Accounting
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `JournalEntriesApiResource` | `org/apache/fineract/accounting/journalentry/api/JournalEntriesApiResource.java` | `/v1/journalentries` |
+
+GL accounts, GL closures, accounting rules, financial-activity-account mapping, product-to-account mappings, provisioning entries and the accrual API resource live in `fineract-accounting` — see [API Reference / journal entries](/api/accounting-api) and [API Reference / GL accounts](/api/accounting-api) for those.
+
+## Ad-hoc query
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `AdHocApiResource` | `org/apache/fineract/adhocquery/api/AdHocApiResource.java` | `/v1/adhocquery` |
+
+## Batch API
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `BatchApiResource` (in `fineract-core`) | `org/apache/fineract/batch/api/BatchApiResource.java` (core module) | `/v1/batches` |
+
+## Close of Business (COB)
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `ConfigureBusinessStepApiResource` | `org/apache/fineract/cob/api/ConfigureBusinessStepApiResource.java` | `/v1/jobs` |
+| `InternalCOBApiResource` | `org/apache/fineract/cob/api/InternalCOBApiResource.java` | `/v1/internal/cob` |
+| `InternalLoanAccountLockApiResource` | `org/apache/fineract/cob/api/InternalLoanAccountLockApiResource.java` | `/v1/internal/loans` |
+| `LoanAccountLockApiResource` | `org/apache/fineract/cob/api/LoanAccountLockApiResource.java` | `/v1/loans` |
+| `LoanCOBCatchUpApiResource` | `org/apache/fineract/cob/api/LoanCOBCatchUpApiResource.java` | `/v1/loans` |
+| `WorkingCapitalLoanCOBCatchUpApiResource` | `org/apache/fineract/cob/api/WorkingCapitalLoanCOBCatchUpApiResource.java` | `/v1/working-capital-loans` |
+
+<Note>
+  Several COB resources share an apex path (`/v1/loans` or `/v1/jobs`) with other resource classes — JAX-RS dispatches by the combined class-level + method-level `@Path`, so `LoanAccountLockApiResource` and `LoansApiResource` coexist under `/v1/loans` because their method-level paths are disjoint.
+</Note>
+
+## Commands (maker-checker)
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `AuditsApiResource` | `org/apache/fineract/commands/api/AuditsApiResource.java` | `/v1/audits` |
+| `MakercheckersApiResource` | `org/apache/fineract/commands/api/MakercheckersApiResource.java` | `/v1/makercheckers` |
+
+## Infrastructure — account number formats
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `AccountNumberFormatsApiResource` | `org/apache/fineract/infrastructure/accountnumberformat/api/AccountNumberFormatsApiResource.java` | `template` (relative — class is mounted under a templating root) |
+
+## Infrastructure — bulk import
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `BulkImportApiResource` | `org/apache/fineract/infrastructure/bulkimport/api/BulkImportApiResource.java` | `/v1/imports` |
+
+## Infrastructure — campaigns
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `EmailApiResource` | `org/apache/fineract/infrastructure/campaigns/email/api/EmailApiResource.java` | `/v1/email` |
+| `EmailCampaignApiResource` | `org/apache/fineract/infrastructure/campaigns/email/api/EmailCampaignApiResource.java` | `/v1/email/campaign` |
+| `EmailConfigurationApiResource` | `org/apache/fineract/infrastructure/campaigns/email/api/EmailConfigurationApiResource.java` | `/v1/email/configuration` |
+| `SmsCampaignApiResource` | `org/apache/fineract/infrastructure/campaigns/sms/api/SmsCampaignApiResource.java` | `/v1/smscampaigns` |
+
+## Infrastructure — codes
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `CodeValuesApiResource` | `org/apache/fineract/infrastructure/codes/api/CodeValuesApiResource.java` | `/v1/codes` |
+| `CodesApiResource` | `org/apache/fineract/infrastructure/codes/api/CodesApiResource.java` | `/v1/codes` |
+
+## Infrastructure — configuration
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `ExternalServicesConfigurationApiResource` | `org/apache/fineract/infrastructure/configuration/api/ExternalServicesConfigurationApiResource.java` | `/v1/externalservice` |
+| `GlobalConfigurationApiResource` | `org/apache/fineract/infrastructure/configuration/api/GlobalConfigurationApiResource.java` | `/v1/configurations` |
+| `InternalConfigurationsApiResource` | `org/apache/fineract/infrastructure/configuration/api/InternalConfigurationsApiResource.java` | `/v1/internal/configurations` |
+
+## Infrastructure — credit bureau
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `CreditBureauConfigurationApiResource` | `org/apache/fineract/infrastructure/creditbureau/api/CreditBureauConfigurationApiResource.java` | `/v1/CreditBureauConfiguration` |
+| `CreditBureauIntegrationApiResource` | `org/apache/fineract/infrastructure/creditbureau/api/CreditBureauIntegrationApiResource.java` | `/v1/creditBureauIntegration` |
+
+## Infrastructure — data queries (datatables & reports)
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `DatatablesApiResource` | `org/apache/fineract/infrastructure/dataqueries/api/DatatablesApiResource.java` | `/v1/datatables` |
+| `EntityDatatableChecksApiResource` | `org/apache/fineract/infrastructure/dataqueries/api/EntityDatatableChecksApiResource.java` | `/v1/entityDatatableChecks` |
+| `ReportsApiResource` | `org/apache/fineract/infrastructure/dataqueries/api/ReportsApiResource.java` | `/v1/reports` |
+| `RunreportsApiResource` | `org/apache/fineract/infrastructure/dataqueries/api/RunreportsApiResource.java` | `/v1/runreports` |
+
+## Infrastructure — entity access
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `FineractEntityApiResource` | `org/apache/fineract/infrastructure/entityaccess/api/FineractEntityApiResource.java` | `/v1/entitytoentitymapping` |
+
+## Infrastructure — hooks
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `HookApiResource` | `org/apache/fineract/infrastructure/hooks/api/HookApiResource.java` | `/v1/hooks` |
+
+## Infrastructure — instance mode
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `InstanceModeApiResource` | `org/apache/fineract/infrastructure/instancemode/api/InstanceModeApiResource.java` | `/v1/instance-mode` |
+
+## Infrastructure — jobs (scheduler)
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `InlineJobApiResource` | `org/apache/fineract/infrastructure/jobs/api/InlineJobApiResource.java` | `/v1/jobs` |
+| `SchedulerApiResource` | `org/apache/fineract/infrastructure/jobs/api/SchedulerApiResource.java` | `/v1/scheduler` |
+| `SchedulerJobApiResource` | `org/apache/fineract/infrastructure/jobs/api/SchedulerJobApiResource.java` | `/v1/jobs` |
+
+## Infrastructure — report mailing jobs
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `ReportMailingJobApiResource` | `org/apache/fineract/infrastructure/reportmailingjob/api/ReportMailingJobApiResource.java` | `{entityId}` (class-level path is a path parameter; mounted under a parent path) |
+| `ReportMailingJobRunHistoryApiResource` | `org/apache/fineract/infrastructure/reportmailingjob/api/ReportMailingJobRunHistoryApiResource.java` | *(none — class has no class-level `@Path`; relies on method-level routing)* |
+
+## Infrastructure — SMS
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `SmsApiResource` | `org/apache/fineract/infrastructure/sms/api/SmsApiResource.java` | `/v1/sms` |
+
+## Infrastructure — survey (PPI / poverty line)
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `LikelihoodApiResource` | `org/apache/fineract/infrastructure/survey/api/LikelihoodApiResource.java` | `/v1/likelihood` |
+| `PovertyLineApiResource` | `org/apache/fineract/infrastructure/survey/api/PovertyLineApiResource.java` | `/v1/povertyLine` |
+| `SurveyApiResource` | `org/apache/fineract/infrastructure/survey/api/SurveyApiResource.java` | `/v1/survey` |
+
+## Interoperation (Mojaloop / Payment Hub)
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `InteropApiResource` | `org/apache/fineract/interoperation/api/InteropApiResource.java` | `/v1/interoperation` |
+
+## Notification
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `NotificationApiResource` | `org/apache/fineract/notification/api/NotificationApiResource.java` | `/v1/notifications` |
+
+## Organisation — holidays
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `HolidaysApiResource` | `org/apache/fineract/organisation/holiday/api/HolidaysApiResource.java` | `/v1/holidays` |
+
+## Organisation — offices
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `OfficeTransactionsApiResource` | `org/apache/fineract/organisation/office/api/OfficeTransactionsApiResource.java` | `/v1/officetransactions` |
+| `OfficesApiResource` | `org/apache/fineract/organisation/office/api/OfficesApiResource.java` | `/v1/offices` |
+
+## Organisation — provisioning
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `ProvisioningCategoryApiResource` | `org/apache/fineract/organisation/provisioning/api/ProvisioningCategoryApiResource.java` | `/v1/provisioningcategory` |
+| `ProvisioningCriteriaApiResource` | `org/apache/fineract/organisation/provisioning/api/ProvisioningCriteriaApiResource.java` | `/v1/provisioningcriteria` |
+
+## Organisation — staff
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `StaffApiResource` | `org/apache/fineract/organisation/staff/api/StaffApiResource.java` | `/v1/staff` |
+
+## Organisation — working days
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `WorkingDaysApiResource` | `org/apache/fineract/organisation/workingdays/api/WorkingDaysApiResource.java` | `/v1/workingdays` |
+
+## Portfolio — account transfers
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `AccountTransfersApiResource` | `org/apache/fineract/portfolio/account/api/AccountTransfersApiResource.java` | `/v1/accounttransfers` |
+| `StandingInstructionApiResource` | `org/apache/fineract/portfolio/account/api/StandingInstructionApiResource.java` | `/v1/standinginstructions` |
+| `StandingInstructionHistoryApiResource` | `org/apache/fineract/portfolio/account/api/StandingInstructionHistoryApiResource.java` | `/v1/standinginstructionrunhistory` |
+
+## Portfolio — accounts (typed)
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `AccountsApiResource` | `org/apache/fineract/portfolio/accounts/api/AccountsApiResource.java` | `/v1/accounts/{type}` |
+
+## Portfolio — address / field configuration
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `EntityFieldConfigurationApiResource` | `org/apache/fineract/portfolio/address/api/EntityFieldConfigurationApiResource.java` | `/v1/fieldconfiguration/{entity}` |
+
+## Portfolio — calendar
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `CalendarsApiResource` | `org/apache/fineract/portfolio/calendar/api/CalendarsApiResource.java` | `/v1/{entityType}/{entityId}/calendars` |
+
+## Portfolio — client
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `ClientAddressApiResource` | `org/apache/fineract/portfolio/client/api/ClientAddressApiResource.java` | `/v1/client` |
+| `ClientChargesApiResource` | `org/apache/fineract/portfolio/client/api/ClientChargesApiResource.java` | `/v1/clients/{clientId}/charges` |
+| `ClientFamilyMembersApiResource` | `org/apache/fineract/portfolio/client/api/ClientFamilyMembersApiResource.java` | `/v1/clients/{clientId}/familymembers` |
+| `ClientIdentifiersApiResource` | `org/apache/fineract/portfolio/client/api/ClientIdentifiersApiResource.java` | `/v1/clients/{clientId}/identifiers` |
+| `ClientTransactionsApiResource` | `org/apache/fineract/portfolio/client/api/ClientTransactionsApiResource.java` | `/v1/clients` |
+| `ClientsApiResource` | `org/apache/fineract/portfolio/client/api/ClientsApiResource.java` | `/v1/clients` |
+| `InternalClientInformationApiResource` | `org/apache/fineract/portfolio/client/api/InternalClientInformationApiResource.java` | `/v1/internal/client` |
+| `ClientSearchV2ApiResource` | `org/apache/fineract/portfolio/client/api/v2/search/ClientSearchV2ApiResource.java` | `/v2/clients` |
+
+## Portfolio — collateral / collateral management
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `CollateralsApiResource` | `org/apache/fineract/portfolio/collateral/api/CollateralsApiResource.java` | `/v1/loans/{loanId}/collaterals` |
+| `ClientCollateralManagementApiResource` | `org/apache/fineract/portfolio/collateralmanagement/api/ClientCollateralManagementApiResource.java` | `/v1/clients/{clientId}/collaterals` |
+| `CollateralManagementApiResource` | `org/apache/fineract/portfolio/collateralmanagement/api/CollateralManagementApiResource.java` | `/v1/collateral-management` |
+| `LoanCollateralManagementApiResource` | `org/apache/fineract/portfolio/collateralmanagement/api/LoanCollateralManagementApiResource.java` | `/v1/loan-collateral-management` |
+
+## Portfolio — collection sheet
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `CollectionSheetApiResource` | `org/apache/fineract/portfolio/collectionsheet/api/CollectionSheetApiResource.java` | `/v1/collectionsheet` |
+
+## Portfolio — fund
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `FundsApiResource` | `org/apache/fineract/portfolio/fund/api/FundsApiResource.java` | `/v1/funds` |
+
+## Portfolio — group / center
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `CentersApiResource` | `org/apache/fineract/portfolio/group/api/CentersApiResource.java` | `/v1/centers` |
+| `GroupsApiResource` | `org/apache/fineract/portfolio/group/api/GroupsApiResource.java` | `/v1/groups` |
+| `GroupsLevelApiResource` | `org/apache/fineract/portfolio/group/api/GroupsLevelApiResource.java` | `/v1/grouplevels` |
+
+## Portfolio — interest rate charts
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `InterestRateChartSlabsApiResource` | `org/apache/fineract/portfolio/interestratechart/api/InterestRateChartSlabsApiResource.java` | `/v1/interestratecharts/{chartId}/chartslabs` |
+| `InterestRateChartsApiResource` | `org/apache/fineract/portfolio/interestratechart/api/InterestRateChartsApiResource.java` | `/v1/interestratecharts` |
+
+## Portfolio — loan account
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `BulkLoansApiResource` | `org/apache/fineract/portfolio/loanaccount/api/BulkLoansApiResource.java` | `/v1/loans/loanreassignment` |
+| `InternalLoanInformationApiResource` | `org/apache/fineract/portfolio/loanaccount/api/InternalLoanInformationApiResource.java` | `/v1/internal/loan` |
+| `LoanChargesApiResource` | `org/apache/fineract/portfolio/loanaccount/api/LoanChargesApiResource.java` | `/v1/loans` |
+| `LoanDisbursementDetailApiResource` | `org/apache/fineract/portfolio/loanaccount/api/LoanDisbursementDetailApiResource.java` | `/v1/loans/{loanId}/disbursements` |
+| `LoanTransactionsApiResource` | `org/apache/fineract/portfolio/loanaccount/api/LoanTransactionsApiResource.java` | `/v1/loans` |
+| `LoansApiResource` | `org/apache/fineract/portfolio/loanaccount/api/LoansApiResource.java` | `/v1/loans` |
+| `LoansPointInTimeApiResource` | `org/apache/fineract/portfolio/loanaccount/api/pointintime/LoansPointInTimeApiResource.java` | `/v1/loans/at-date` |
+| `GuarantorsApiResource` | `org/apache/fineract/portfolio/loanaccount/guarantor/api/GuarantorsApiResource.java` | `/v1/loans/{loanId}/guarantors` |
+
+## Portfolio — loan product
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `LoanProductsApiResource` | `org/apache/fineract/portfolio/loanproduct/api/LoanProductsApiResource.java` | `/v1/loanproducts` |
+| `ProductMixApiResource` | `org/apache/fineract/portfolio/loanproduct/productmix/api/ProductMixApiResource.java` | `/v1/loanproducts/{productId}/productmix` |
+
+## Portfolio — meeting
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `MeetingsApiResource` | `org/apache/fineract/portfolio/meeting/api/MeetingsApiResource.java` | `/v1/{entityType}/{entityId}/meetings` |
+
+## Portfolio — note
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `NotesApiResource` | `org/apache/fineract/portfolio/note/api/NotesApiResource.java` | `/v1/{resourceType:.+}/{resourceId}/notes` |
+
+## Portfolio — generic products
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `ProductsApiResource` | `org/apache/fineract/portfolio/products/api/ProductsApiResource.java` | `/v1/products/{type}` |
+
+## Portfolio — rate
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `RateApiResource` | `org/apache/fineract/portfolio/rate/api/RateApiResource.java` | `/v1/rates` |
+
+## Portfolio — post-dated checks
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `RepaymentWithPostDatedChecksApiResource` | `org/apache/fineract/portfolio/repaymentwithpostdatedchecks/api/RepaymentWithPostDatedChecksApiResource.java` | `/v1/loans/{loanId}/postdatedchecks` |
+
+## Portfolio — savings (savings, fixed deposit, recurring deposit)
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `DepositAccountOnHoldFundTransactionsApiResource` | `org/apache/fineract/portfolio/savings/api/DepositAccountOnHoldFundTransactionsApiResource.java` | `/v1/savingsaccounts/{savingsId}/onholdtransactions` |
+| `FixedDepositAccountTransactionsApiResource` | `org/apache/fineract/portfolio/savings/api/FixedDepositAccountTransactionsApiResource.java` | `/v1/fixeddepositaccounts/{fixedDepositAccountId}/transactions` |
+| `FixedDepositAccountsApiResource` | `org/apache/fineract/portfolio/savings/api/FixedDepositAccountsApiResource.java` | `/v1/fixeddepositaccounts` |
+| `FixedDepositProductsApiResource` | `org/apache/fineract/portfolio/savings/api/FixedDepositProductsApiResource.java` | `/v1/fixeddepositproducts` |
+| `InternalSavingsAccountInformationApiResource` | `org/apache/fineract/portfolio/savings/api/InternalSavingsAccountInformationApiResource.java` | `/v1/internal/savingsaccounts` |
+| `RecurringDepositAccountTransactionsApiResource` | `org/apache/fineract/portfolio/savings/api/RecurringDepositAccountTransactionsApiResource.java` | `/v1/recurringdepositaccounts/{recurringDepositAccountId}/transactions` |
+| `RecurringDepositAccountsApiResource` | `org/apache/fineract/portfolio/savings/api/RecurringDepositAccountsApiResource.java` | `/v1/recurringdepositaccounts` |
+| `RecurringDepositProductsApiResource` | `org/apache/fineract/portfolio/savings/api/RecurringDepositProductsApiResource.java` | `/v1/recurringdepositproducts` |
+| `SavingsAccountChargesApiResource` | `org/apache/fineract/portfolio/savings/api/SavingsAccountChargesApiResource.java` | `/v1/savingsaccounts/{savingsAccountId}/charges` |
+| `SavingsAccountTransactionsApiResource` | `org/apache/fineract/portfolio/savings/api/SavingsAccountTransactionsApiResource.java` | `/v1/savingsaccounts` |
+| `SavingsAccountsApiResource` | `org/apache/fineract/portfolio/savings/api/SavingsAccountsApiResource.java` | `/v1/savingsaccounts` |
+| `SavingsProductsApiResource` | `org/apache/fineract/portfolio/savings/api/SavingsProductsApiResource.java` | `/v1/savingsproducts` |
+
+## Portfolio — search
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `SearchApiResource` | `org/apache/fineract/portfolio/search/api/SearchApiResource.java` | `/v1/search` |
+
+## Portfolio — share products
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `ShareDividendApiResource` | `org/apache/fineract/portfolio/shareproducts/api/ShareDividendApiResource.java` | `/v1/shareproduct/{productId}/dividend` |
+
+## SPM (Social Performance Management)
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `LookupTableApiResource` | `org/apache/fineract/spm/api/LookupTableApiResource.java` | `/v1/surveys/{surveyId}/lookuptables` |
+| `ScorecardApiResource` | `org/apache/fineract/spm/api/ScorecardApiResource.java` | `/v1/surveys/scorecards` |
+| `SpmApiResource` | `org/apache/fineract/spm/api/SpmApiResource.java` | `/v1/surveys` |
+
+## Template engine
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `TemplatesApiResource` | `org/apache/fineract/template/api/TemplatesApiResource.java` | `/v1/templates` |
+
+## User administration
+
+| Class | File | Root path |
+| --- | --- | --- |
+| `ForgotPasswordApiResource` | `org/apache/fineract/useradministration/api/ForgotPasswordApiResource.java` | `/v1/password` |
+| `PasswordPreferencesApiResource` | `org/apache/fineract/useradministration/api/PasswordPreferencesApiResource.java` | `/template` (mounted under a parent password-preferences path) |
+| `PermissionsApiResource` | `org/apache/fineract/useradministration/api/PermissionsApiResource.java` | `/v1/permissions` |
+| `RolesApiResource` | `org/apache/fineract/useradministration/api/RolesApiResource.java` | `/v1/roles` |
+| `UsersApiResource` | `org/apache/fineract/useradministration/api/UsersApiResource.java` | `/v1/users` |
+
+## Commonly-used resources — method excerpts
+
+The catalogue above is uniform but the heaviest endpoints are worth seeing inline. The signatures below are taken verbatim from the source (with whitespace normalised). They are **not** exhaustive — `LoansApiResource` alone has 30+ methods. Use these as a navigation aid; the full surface lives in the source file or in the generated OpenAPI spec.
+
+### `BatchApiResource` — `/v1/batches`
+
+In `fineract-core/src/main/java/org/apache/fineract/batch/api/BatchApiResource.java`:
+
+```java
+// Class
+@Path("/v1/batches")
+// One method, dispatches every internal CommandStrategy
+@POST
+public Response handleBatchRequests(@QueryParam("enclosingTransaction") final boolean enclosingTransaction,
+                                    final String requestBody);
+```
+
+See [Batch API](/batch/overview) for how `BatchApiService` fans the strategies out.
+
+### `ClientsApiResource` — `/v1/clients`
+
+The full class is ~30 endpoints — clients, GLIM accounts, lifecycle transitions, image upload, address, bulk import. Excerpt of the bulk-import endpoint:
+
+```java
+@GET @Path("downloadtemplate")
+@Produces("application/vnd.ms-excel")
+@Operation(summary = "Download client template for bulk import",
+           operationId = "getClientTemplate")
+public Response getClientTemplate(@QueryParam("legalFormType") ... );
+```
+
+See [Clients API](/api/clients-api).
+
+### `LoansApiResource` — `/v1/loans`
+
+`LoansApiResource` is the largest single resource in the codebase. Selected methods:
+
+```java
+@GET @Path("{loanId}/template")
+@Produces({ MediaType.APPLICATION_JSON })
+@ApiResponses({ @ApiResponse(responseCode = "200", description = "OK",
+        content = @Content(schema = @Schema(
+                implementation = LoansApiResourceSwagger.GetLoansApprovalTemplateResponse.class))) })
+public String retrieveApprovalTemplate(@PathParam("loanId") ... );
+
+@GET @Path("downloadtemplate")
+@Produces("application/vnd.ms-excel")
+public Response getLoansTemplate(@QueryParam("officeId") ... );
+
+@GET @Path("glimAccount/{glimId}")
+@Produces({ MediaType.APPLICATION_JSON })
+public String getGlimRepaymentTemplate(@PathParam("glimId") ... );
+
+@GET @Path("repayments/downloadtemplate")
+@Produces("application/vnd.ms-excel")
+public Response getLoanRepaymentTemplate(@QueryParam("officeId") ... );
+
+@POST @Path("uploadtemplate")
+@Consumes(MediaType.MULTIPART_FORM_DATA)
+@RequestBody(description = "Upload Loan template",
+             content = { @Content(mediaType = MediaType.MULTIPART_FORM_DATA,
+                                  schema = @Schema(implementation = UploadRequest.class)) })
+public String postLoanTemplate(@FormDataParam("file") ... );
+
+@POST @Path("repayments/uploadtemplate")
+@Consumes(MediaType.MULTIPART_FORM_DATA)
+public String postLoanRepaymentTemplate(@FormDataParam("file") ... );
+
+@GET @Path("{loanId}/approved-amount")
+@Produces(MediaType.APPLICATION_JSON)
+@Operation(summary = "Collects and returns the approved amount modification history for a given loan")
+public List<LoanApprovedAmountHistoryData> getLoanApprovedAmountHistory(@PathParam("loanId") ... );
+
+@GET @Path("external-id/{loanExternalId}/approved-amount")
+@Produces(MediaType.APPLICATION_JSON)
+public List<LoanApprovedAmountHistoryData> getLoanApprovedAmountHistory(@PathParam("loanExternalId") ... );
+```
+
+The complete catalogue of GET/POST/PUT/DELETE methods is in [Loans API](/api/loans-api).
+
+### `SavingsAccountsApiResource` — `/v1/savingsaccounts`
+
+```java
+@POST @Path("/gsim")
+@Consumes({ MediaType.APPLICATION_JSON })
+@Produces({ MediaType.APPLICATION_JSON })
+public String submitGSIMApplication(final String apiRequestBodyAsJson);
+
+@GET @Path("{accountId}")
+@Produces({ MediaType.APPLICATION_JSON })
+@Operation(summary = "Retrieve a savings account",
+           operationId = "retrieveSavingsAccount")
+public SavingsAccountData retrieveOne(@PathParam("accountId") ... );
+
+@GET @Path("/external-id/{externalId}")
+@Produces({ MediaType.APPLICATION_JSON })
+@Operation(summary = "Retrieve a savings account by external ID",
+           operationId = "retrieveSavingsAccountByExternalId")
+public SavingsAccountData retrieveOne(@PathParam("externalId") ... );
+
+@PUT @Path("/gsim/{parentAccountId}")
+@Consumes({ MediaType.APPLICATION_JSON })
+@Produces({ MediaType.APPLICATION_JSON })
+public String updateGsim(@PathParam("parentAccountId") ... );
+
+@POST @Path("/gsimcommands/{parentAccountId}")
+@Consumes({ MediaType.APPLICATION_JSON })
+@Produces({ MediaType.APPLICATION_JSON })
+public String handleGSIMCommands(@PathParam("parentAccountId") ... );
+
+@GET @Path("downloadtemplate")
+@Produces("application/vnd.ms-excel")
+public Response getSavingsTemplate(@QueryParam("officeId") ... );
+
+@POST @Path("uploadtemplate")
+@Consumes(MediaType.MULTIPART_FORM_DATA)
+public String postSavingsTemplate(@FormDataParam("file") ... );
+
+@GET @Path("transactions/downloadtemplate")
+@Produces("application/vnd.ms-excel")
+public Response getSavingsTransactionTemplate(@QueryParam("officeId") ... );
+
+@POST @Path("transactions/uploadtemplate")
+@Consumes(MediaType.MULTIPART_FORM_DATA)
+public String postSavingsTransactionTemplate(@FormDataParam("file") ... );
+```
+
+See [Savings API](/api/savings-api).
+
+### `JournalEntriesApiResource` — `/v1/journalentries`
+
+The class root path is `/v1/journalentries`. The methods cover listing (with rich query parameters: `officeId`, `glAccountId`, `manualEntriesOnly`, `fromDate`, `toDate`, `transactionId`, `entityType`, `entityId`, `runningBalance` etc.), retrieve-one, create (POST), and command-style mutations via `?command=...` (`reverse`, `defineOpeningBalance`).
+
+See [Journal entries API](/api/accounting-api) for the full method-by-method catalogue.
+
+## Cross references
+
+<CardGroup cols={2}>
+  <Card title="Jersey bootstrap" icon="route" href="/provider/jersey-bootstrap">
+    How `JerseyConfig` discovers and registers every `@Path` bean.
+  </Card>
+  <Card title="API Reference overview" icon="book" href="/api/overview">
+    Grouped per-resource API documentation with method-by-method drill-downs.
+  </Card>
+  <Card title="Swagger / OpenAPI" icon="book-open" href="/provider/swagger-openapi">
+    How the OpenAPI document is built from these resources at compile time.
+  </Card>
+  <Card title="Serialization & Jersey" icon="arrows-rotate" href="/runtime/serialization-and-jersey">
+    The Jackson `ObjectMapper`, `JsonConverter`s, GSON legacy serializers used by these resources.
+  </Card>
+</CardGroup>

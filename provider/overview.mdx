@@ -1,0 +1,276 @@
+---
+title: "fineract-provider overview"
+sidebarTitle: "Overview"
+description: "Spring Boot application module that hosts the embedded Tomcat, wires every Fineract subsystem, exposes the JAX-RS REST API, and ships the Liquibase changelogs, ESAPI config, default keystore and Logback configuration."
+---
+
+`fineract-provider` is the deployable Spring Boot application at the centre of the multi-module build. It is the only module that produces a runnable JAR/WAR. It depends on every other `fineract-*` module (loan, savings, accounting, COB, commands, security, validation, document, etc.) and wires them into one process via component scan, then bootstraps an embedded Tomcat with a Jersey JAX-RS dispatcher, a Spring Security filter chain and the per-tenant `RoutingDataSource`.
+
+Source root: `fineract-provider/src/main/java/org/apache/fineract/`. The `main()` lives in `ServerApplication.java` and the Spring `@Configuration` it imports is `FineractWebApplicationConfiguration` (in `fineract-core`'s `infrastructure.core.boot` package), which itself does `@ComponentScan(basePackages = "org.apache.fineract.**")` and excludes the Spring Boot auto‑configurations the platform wants to drive itself (data source, JPA, Liquibase, Gson, JDBC template).
+
+## Module identity
+
+The Gradle module descriptor (`fineract-provider/build.gradle`) declares the artifact and the plugins that produce the runnable artefacts and OpenAPI:
+
+```groovy fineract-provider/build.gradle
+description = 'Fineract Provider'
+
+apply plugin: 'org.zeroturnaround.gradle.jrebel'
+apply plugin: 'java'
+apply plugin: 'eclipse'
+apply plugin: 'org.springframework.boot'
+apply plugin: 'com.gorylenko.gradle-git-properties'
+apply plugin: 'io.swagger.core.v3.swagger-gradle-plugin'
+apply plugin: 'com.google.cloud.tools.jib'
+apply plugin: 'org.springframework.boot'
+apply plugin: 'se.thinkcode.cucumber-runner'
+apply plugin: 'com.docktape.swagger-brake'
+```
+
+| Plugin | What it produces |
+| --- | --- |
+| `org.springframework.boot` | Spring Boot fat-jar / WAR, `BOOT-INF/` layout |
+| `io.swagger.core.v3.swagger-gradle-plugin` | `build/resources/main/static/fineract.json` & `fineract.yaml` (executed via the `resolve` task that references `FineractOperationIdReader` and `config/swagger/fineract-input.yaml.template`) |
+| `com.docktape.swagger-brake` | Breaking-change check against `config/swagger/fineract-baseline.json` |
+| `com.google.cloud.tools.jib` | OCI container image (used by `docker/` and `kubernetes/`) |
+| `com.gorylenko.gradle-git-properties` | `git.properties` consumed by Actuator `/info` |
+| `org.zeroturnaround.gradle.jrebel` | Optional JRebel `rebel.xml` for hot reload during development |
+
+The Swagger task is configured to render the OpenAPI spec from the runtime classpath:
+
+```groovy fineract-provider/build.gradle
+resolve {
+    outputFileName = 'fineract'
+    outputFormat = 'JSONANDYAML'
+    classpath = sourceSets.main.runtimeClasspath
+    outputDir = file("${buildDir}/resources/main/static")
+    openApiFile = file("${buildDir}/tmp/swagger/fineract-input.yaml")
+    readerClass = 'org.apache.fineract.infrastructure.openapi.FineractOperationIdReader'
+    sortOutput = true
+}
+```
+
+`FineractOperationIdReader` lives in `fineract-provider` (see [Swagger / OpenAPI](/provider/swagger-openapi)) and is the only Swagger-specific class shipped from this module — every actual schema lives next to its `ApiResource` in the owning module under a sibling `*ApiResourceSwagger.java`.
+
+## Top-level Java packages
+
+Every package directly under `org.apache.fineract` in `fineract-provider/src/main/java/` corresponds to a functional area. None of them are "leaf" packages — they each contain `api/`, `domain/`, `service/`, `handler/`, `data/`, `jobs/`, `exception/` subtrees. The provider ships the orchestration glue and the JAX-RS resources for these areas; deeper domain types frequently live in the dedicated `fineract-loan`, `fineract-savings`, `fineract-accounting`, `fineract-cob`, etc. sibling modules and are accessed through Spring beans.
+
+| Package | What lives there | Drill-down |
+| --- | --- | --- |
+| `accounting` | Journal entries, GL closure, accrual, financial-activity accounts, provisioning, rules, glue between portfolio events and the GL. The `accounting/journalentry/api/JournalEntriesApiResource` is the JAX-RS entry point. | [Accounting Subsystem](/accounting/overview) |
+| `adhocquery` | "Ad-hoc query" SQL definitions (saved SQL templates executed against the tenant DB). Single `AdHocApiResource` under `/v1/adhocquery`. | [Data queries](/core/data-queries) |
+| `batch` | `command/internal/*CommandStrategy` implementations used by `BatchApiService` (in `fineract-core`) to invoke other API resources in a single batch HTTP request. | [Batch API](/batch/overview) |
+| `cob` | Close-of-Business glue: business-step configuration, loan account locks, COB catch-up API resources. | [Close of Business](/cob/overview) |
+| `commands` | Maker-checker UI: `AuditsApiResource`, `MakercheckersApiResource`, command-source query side. The bus and handlers themselves are in the `fineract-command*` modules. | [Commands & Maker-Checker](/commands/overview) |
+| `infrastructure` | Cross-cutting platform code wired by the provider: Spring `@Configuration`, JAX-RS bootstrap (`core/jersey/`), security, scheduler, bulk import, codes, configuration, data queries, datatable checks, sms/email campaigns, hooks, jobs, openapi, instance-mode, survey, etc. | This page + [Spring configuration](/provider/spring-configuration) |
+| `interoperation` | Mojaloop / Payment Hub interoperation. `InteropApiResource` under `/v1/interoperation`. | [Mojaloop interop](/integrations/interoperation-mojaloop) |
+| `notification` | In-app notification feed (`NotificationApiResource`). Push transports are in `infrastructure/campaigns/*`. | [Notification](/notification/overview) |
+| `organisation` | Offices, staff, holidays, working days, provisioning categories & criteria. | [Organisation](/organisation/offices) |
+| `portfolio` | The bulk of the business surface: client, group, center, loanaccount, loanproduct, savings, accounts (transfers), collateral, charges, calendar, search. | [Loan](/loan/overview), [Savings](/savings/overview), [Portfolio](/portfolio/client) |
+| `spm` | Social Performance Management surveys (`SpmApiResource`, `ScorecardApiResource`, `LookupTableApiResource`). | [SPM surveys](/integrations/spm-surveys) |
+| `template` | Freemarker / Mustache-style document templates used by the document engine. | [Templates](/notification/templates) |
+| `useradministration` | `AppUser`, roles, permissions, password preferences, forgot-password flow. | [User Administration](/users/overview) |
+
+The leaf class that actually starts the JVM is intentionally tiny — all the real work happens in `FineractWebApplicationConfiguration`:
+
+```java fineract-provider/src/main/java/org/apache/fineract/ServerApplication.java
+public class ServerApplication extends SpringBootServletInitializer {
+
+    @Import({ FineractWebApplicationConfiguration.class, FineractLiquibaseOnlyApplicationConfiguration.class })
+    private static final class Configuration {}
+
+    @Override
+    protected SpringApplicationBuilder configure(SpringApplicationBuilder builder) {
+        return configureApplication(builder);
+    }
+
+    private static SpringApplicationBuilder configureApplication(SpringApplicationBuilder builder) {
+        return builder.sources(Configuration.class);
+    }
+
+    public static void main(String[] args) throws IOException {
+        configureApplication(new SpringApplicationBuilder(ServerApplication.class)).run(args);
+    }
+}
+```
+
+Both imported `@Configuration` classes select themselves via a `@Conditional` so only one is ever active per launch — the web mode (default) and `liquibase-only` mode (used by the migration entrypoint). See [Bootstrap & Runtime](/runtime/server-application).
+
+## How the provider wires modules
+
+The provider is what turns the dozens of `fineract-*` libraries into a single Spring `ApplicationContext`. The diagram below traces module dependencies as they are stitched in at runtime — `@ComponentScan("org.apache.fineract.**")` discovers every `@Component`, `@Service`, `@Repository`, `@Configuration`, `@Path`-annotated bean across every JAR on the classpath.
+
+```mermaid
+flowchart TB
+    subgraph BOOT[Bootstrap]
+        SA[ServerApplication.main]
+        FWAC[FineractWebApplicationConfiguration<br/>fineract-core]
+        FCFG[infrastructure.core.config.*<br/>SpringConfig, JdbcConfig,<br/>JdbcTransactionConfig, HikariCpConfig,<br/>SecurityConfig, MetricsConfig,<br/>OkHttp3Config, ContentS3Config]
+        SA --> FWAC --> FCFG
+    end
+
+    subgraph WEB[Web layer]
+        JER[JerseyConfig<br/>infrastructure.core.jersey]
+        JC[JerseyJacksonConverterConfig]
+        EXC[exceptionmapper.*<br/>30 @Provider ExceptionMappers]
+        JER --> JC
+        JER --> EXC
+    end
+
+    subgraph SEC[Security]
+        SC[SecurityConfig<br/>SecurityFilterChain]
+        FLT[Filters:<br/>TenantAwareBasicAuthentication,<br/>RequestResponse, CallerIpTracking,<br/>CorrelationHeader, IdempotencyStore,<br/>FineractInstanceMode, LoanCOB,<br/>TwoFactor, ProgressiveLoanModelChecker]
+        SC --> FLT
+    end
+
+    subgraph CMD[Command bus]
+        SCPS[SynchronousCommandProcessingService]
+        CHANDLERS[CommandHandler<br/>implementations]
+        SCPS --> CHANDLERS
+    end
+
+    subgraph DOMAIN[Domain modules]
+        LOAN[fineract-loan]
+        PLOAN[fineract-progressive-loan]
+        WCLOAN[fineract-working-capital-loan]
+        SAV[fineract-savings]
+        ACC[fineract-accounting]
+        INV[fineract-investor]
+        DOC[fineract-document]
+        BR[fineract-branch]
+        CHG[fineract-charge / fineract-rates / fineract-tax]
+    end
+
+    subgraph CROSS[Cross-cutting modules]
+        COB[fineract-cob]
+        JOBS[infrastructure/jobs<br/>Spring Batch]
+        EVT[External events<br/>fineract-avro-schemas]
+        CMDM[fineract-command*]
+        SECM[fineract-security]
+        VALID[fineract-validation]
+        REPMIX[fineract-report / fineract-mix]
+    end
+
+    subgraph DATA[Persistence]
+        RDS[(RoutingDataSource<br/>per-tenant)]
+        TS[(tenant_store)]
+        LBM[Liquibase tenant/tenant-store<br/>db/changelog/...]
+        S3[S3 / FS content store]
+    end
+
+    BOOT --> WEB
+    BOOT --> SEC
+    BOOT --> DATA
+
+    WEB -->|@Path beans| CHANDLERS
+    JER -->|registered ApiResource beans| LOAN
+    JER -->|registered ApiResource beans| SAV
+    JER -->|registered ApiResource beans| ACC
+    JER -->|registered ApiResource beans| COB
+    JER -->|registered ApiResource beans| DOC
+
+    SEC --> SECM
+    FLT --> CMDM
+    CHANDLERS --> LOAN
+    CHANDLERS --> SAV
+    CHANDLERS --> ACC
+    CHANDLERS --> INV
+    CHANDLERS --> DOC
+    CHANDLERS --> CHG
+    LOAN --> PLOAN
+    LOAN --> WCLOAN
+    LOAN --> ACC
+    SAV --> ACC
+    INV --> ACC
+    COB --> LOAN
+    COB --> SAV
+    COB --> INV
+    JOBS --> LOAN
+    JOBS --> SAV
+    JOBS --> ACC
+    LOAN --> EVT
+    SAV --> EVT
+    ACC --> EVT
+    DOC --> S3
+    LOAN --> RDS
+    SAV --> RDS
+    ACC --> RDS
+    SECM --> TS
+    LBM --> RDS
+    LBM --> TS
+```
+
+The interesting hand-offs are:
+
+- `JerseyConfig` walks the Spring context after refresh and registers **every** bean annotated `@Path` or `@Provider`. There is no static list of resources — adding a class with `@Path` anywhere on the classpath puts it on the wire (see [Jersey bootstrap](/provider/jersey-bootstrap)).
+- `SecurityConfig` builds a single `SecurityFilterChain` matching `/api/**` and conditionally inserts the COB, instance-mode, idempotency, IP-tracking, two-factor and progressive-loan-model-checker filters before/after Spring Security's built-in ones (see [CORS & filters](/provider/cors-and-filters)).
+- The command bus (`SynchronousCommandProcessingService` in `fineract-command-core`) is invoked by every `*ApiResource` write endpoint via the `PortfolioCommandSourceWritePlatformService`; the bus then dispatches to a `CommandHandler` keyed by `actionName` + `entityName`.
+- `RoutingDataSource` is the per-thread tenant-resolving wrapper around HikariCP pools, driven by the `tenant_store` database and the `FineractPlatformTenant` resolved by `TenantAwareBasicAuthenticationFilter` / the OAuth2 tenant filter.
+
+## Resources directory
+
+`fineract-provider/src/main/resources/` is the classpath root for everything the JAR carries that is not Java. Its contents are part of the deployable artefact and the binary contract with the database, the security tooling and the logging stack.
+
+| Path | Purpose |
+| --- | --- |
+| `application.properties` | Default Spring Boot properties for the provider. Every key is overridable via env var via the `${ENV_NAME:default}` placeholder syntax. Sections include CORS, HikariCP, springdoc, management/Actuator, OAuth2, 2FA, content store, OkHttp timeouts, task executors, external events, idempotency, COB, retry config. |
+| `application-liquibase-only.properties` | Properties profile selected when running the migration-only entrypoint (`FineractLiquibaseOnlyApplicationConfiguration`). |
+| `banner.txt` | Spring Boot ASCII banner printed at startup. |
+| `db/changelog/` | Liquibase master changelog and two changelog trees: `db/changelog/db.changelog-master.xml`, `db/changelog/tenant/` (per-tenant schema) and `db/changelog/tenant-store/` (the tenant catalogue). See [Liquibase changelogs](/data/liquibase-migrations). |
+| `sql/migrations/` | Sample-data seed scripts (`sql/migrations/sample_data/...`) inserted via the Liquibase `sample_data` context. |
+| `jpa/static-weaving/` | Inputs for the EclipseLink static weaving plugin executed by `gradle/static-weaving.gradle`. |
+| `META-INF/orm.xml` | Global EclipseLink mapping override (e.g. shared converters, listeners). |
+| `static/legacy-docs/` | The legacy HTML API documentation (`apiLive.htm`, `apidocs.css`, `jquery-1.7.min.js`) served as static content for backward compatibility with the old Mifos docs URL. The current Swagger UI lives at `/swagger-ui/` and reads `static/fineract.json` produced by the Gradle Swagger plugin. |
+| `templates/login.html` | Login HTML used by the OAuth2 authorization-server flow (`fineract.security.oauth2`). |
+| `ESAPI.properties` | OWASP ESAPI configuration used by `SqlInjectionPreventer` and other input-sanitisation utilities in `fineract-security`. |
+| `keystore.jks` | Demo PKCS12-format keystore used to terminate TLS on `https://localhost:8443` by default. **Replace in production** — see `server.ssl.*` keys in `application.properties`. |
+| `logback-spring.xml` | Logback configuration: console appender with the correlation-ID-aware pattern defined in `application.properties` (`logging.pattern.console=...%X{correlationId}... [%X{tenantId}]...`). |
+| `messages.properties` / `messages_de.properties` | i18n resource bundles for API error messages emitted by the platform exception mappers. |
+| `validation.properties` | Hibernate-Validator constraint message overrides. |
+
+<Note>
+  The `keystore.jks` shipped in `src/main/resources/` is purely for local development. The Docker images and Kubernetes manifests under `docker/` and `kubernetes/` set `server.ssl.keystore` to a mounted secret. See [Configuration](/config/application-properties).
+</Note>
+
+## What does *not* live in `fineract-provider`
+
+The provider is intentionally thin on domain. If you are looking for any of the following, follow the link instead:
+
+| Topic | Lives in | Wiki |
+| --- | --- | --- |
+| `Loan`, `LoanRepaymentSchedule`, transaction processors | `fineract-loan` | [Loan domain model](/loan/loan-domain-model) |
+| Progressive EMI calculator | `fineract-progressive-loan` | [Progressive Loan](/progressive-loan/overview) |
+| `SavingsAccount`, fixed-/recurring-deposit aggregates | `fineract-savings` | [Savings](/savings/overview) |
+| `Journal`, `GLAccount`, `AccrualEngine` | `fineract-accounting` | [Accounting](/accounting/overview) |
+| COB `BusinessStep` interface and listeners | `fineract-cob` | [COB](/cob/overview) |
+| `BatchApiResource`, `BatchApiService` | `fineract-core` (the strategies, however, live in this module's `batch/command/internal/`) | [Batch API](/batch/overview) |
+| `CommandSource`, `CommandHandler` dispatch SPI | `fineract-command-core`, `fineract-command-*` variants | [Commands](/commands/overview) |
+| Filter implementations (`TenantAwareBasicAuthenticationFilter`, `TwoFactorAuthenticationFilter`) | `fineract-security` | [Security filters](/security/filters) |
+| `CallerIpTrackingFilter`, `CorrelationHeaderFilter`, `RequestResponseFilter`, `IdempotencyStoreFilter` | `fineract-core` `infrastructure/core/filters/` | [CORS & filters](/provider/cors-and-filters) |
+| Avro event schemas (`.avsc`) | `fineract-avro-schemas` | [Avro schemas](/events/avro-schemas) |
+
+The provider's role is purely composition + JAX-RS surface. When in doubt, search the relevant `fineract-<module>` source first.
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="API resources index" icon="list" href="/provider/api-resources-index">
+    Catalogue of all 111 `*ApiResource` classes by package, with their JAX-RS path roots.
+  </Card>
+  <Card title="Spring configuration" icon="gears" href="/provider/spring-configuration">
+    Every `@Configuration` class under `infrastructure/core/config/` and its beans.
+  </Card>
+  <Card title="Jersey bootstrap" icon="route" href="/provider/jersey-bootstrap">
+    `JerseyConfig`, the `ObjectMapper` setup, `MessageBodyReader/Writer` and `ExceptionMapper` providers.
+  </Card>
+  <Card title="CORS & filters" icon="filter" href="/provider/cors-and-filters">
+    `SecurityConfig` `SecurityFilterChain`, CORS source, filter ordering and feature toggles.
+  </Card>
+  <Card title="Swagger / OpenAPI" icon="book-open" href="/provider/swagger-openapi">
+    `FineractOperationIdReader`, `*ApiResourceSwagger` siblings, `springdoc` Swagger UI.
+  </Card>
+  <Card title="Actuator & metrics" icon="chart-line" href="/provider/actuator-and-metrics">
+    `MetricsConfig`, exposed actuator endpoints, Micrometer/Prometheus/CloudWatch/OTLP wiring.
+  </Card>
+</CardGroup>
