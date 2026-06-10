@@ -1,7 +1,7 @@
 ---
 title: "Charges, funds, rates, taxes reference tables"
 sidebarTitle: "Charges & Funds"
-description: "m_charge, m_fund, m_floating_rate, m_floating_rate_period, m_tax_component, m_tax_group, m_payment_type — reference financial data."
+description: "m_charge, m_fund, m_floating_rates, m_floating_rates_periods, m_tax_component, m_tax_group, m_payment_type — reference financial data."
 ---
 
 Apache Fineract keeps financial reference data in a tight cluster of small but heavily-referenced tables. Charges (`m_charge`) are reusable fee definitions cross-linked from `m_loan_charge`, `m_savings_account_charge`, and `m_client_charge`. Funds (`m_fund`) tag loans with their source of capital. Floating rates (`m_floating_rates`, `m_floating_rates_periods`) underpin variable-rate lending. Taxes (`m_tax_component`, `m_tax_group`, `m_tax_group_mappings`) handle GST / VAT / WHT on charges and interest. Payment types (`m_payment_type`) drive cash, cheque, bank-transfer, mobile-wallet behaviour and feed GL routing through `acc_product_mapping.payment_type`.

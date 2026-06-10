@@ -28,10 +28,10 @@ The job names come from `fineract-core/src/main/java/org/apache/fineract/infrast
 ```mermaid
 flowchart TD
     Q[Quartz trigger] --> SBR[ScheduledJobRunner]
-    SBR --> Tasklet[Spring Batch Tasklet\n e.g. PostInterestForSavingsTasklet]
+    SBR --> Tasklet[Spring Batch Tasklet<br/> e.g. PostInterestForSavingsTasklet]
     Tasklet --> Reader[Reader: query active accounts due]
     Reader --> Loop{For each account}
-    Loop --> Domain[SavingsAccount.calculateInterestUsing\nSavingsAccount.postInterest]
+    Loop --> Domain[SavingsAccount.calculateInterestUsing<br/>SavingsAccount.postInterest]
     Domain --> Tx[Append SavingsAccountTransaction]
     Tx --> JE[Journal Entry Writer]
     Tx --> Summary[Update SavingsAccountSummary]

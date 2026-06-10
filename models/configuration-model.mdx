@@ -1,10 +1,10 @@
 ---
 title: "Configuration and reference data tables"
 sidebarTitle: "Configuration Model"
-description: "c_configuration, c_external_service, c_business_step_config, m_organisation_currency, m_office_country, m_code, m_code_value — reference data tables."
+description: "c_configuration, c_external_service, m_batch_business_steps, m_organisation_currency, m_code, m_code_value — reference data tables."
 ---
 
-Configuration tables in Apache Fineract hold cross-cutting toggles and reference data that the rest of the schema points at: feature flags (`c_configuration`), the catalogue of external services and their credentials (`c_external_service`), the ordered list of business steps the COB workflow should run (`c_business_step_config`), the per-tenant active currency list (`m_organisation_currency`), and the soft-enumeration system (`m_code` + `m_code_value`) referenced by dozens of `*_cv_id` columns across portfolio tables.
+Configuration tables in Apache Fineract hold cross-cutting toggles and reference data that the rest of the schema points at: feature flags (`c_configuration`), the catalogue of external services and their credentials (`c_external_service`), the ordered list of business steps the COB workflow should run (`m_batch_business_steps`), the per-tenant active currency list (`m_organisation_currency`), and the soft-enumeration system (`m_code` + `m_code_value`) referenced by dozens of `*_cv_id` columns across portfolio tables.
 
 These tables are mostly defined in `fineract-provider/src/main/resources/db/changelog/tenant/parts/0001_initial_schema.xml`, with feature-flag additions and business-step rows landing through later changelog modules.
 
@@ -18,9 +18,7 @@ erDiagram
     m_code_value ||--o{ m_address : "state/country_id"
     m_code_value ||--o{ m_client_identifier : "document_type_cv_id"
     m_organisation_currency }o--|| m_office : "scope"
-    m_office_country }o--|| m_office : "office_id"
     c_external_service ||--o{ c_external_service_properties : "name"
-    c_business_step_config ||--o{ c_job_step : "job"
     c_configuration }o--o| m_code_value : "string_value (rarely)"
 ```
 
@@ -76,7 +74,7 @@ Apache Fineract talks to S3, SMTP, SMS gateways, and notification services throu
 
 Composite primary key on `(name, external_service_id)` ensures one row per property per service. Foreign key: `FK_external_service_properties_service` → `c_external_service(id)`.
 
-## c_business_step_config — COB workflow definition
+## m_batch_business_steps — COB workflow definition
 
 Defines which Spring Batch steps run inside the Close-of-Business job and in what order.
 
@@ -104,18 +102,6 @@ Per-tenant list of currencies enabled for transactions, scoped from the global `
 | `internationalized_name_code` | `VARCHAR(50)` | i18n key. |
 
 The full master `m_currency` table has the same column set and is read-only. `m_organisation_currency` is a copy of the rows the tenant has enabled, so currency lookups don't roundtrip to the master.
-
-## m_office_country — office country tagging
-
-Added through the `fineract-branch` module to tag offices with their country code.
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `BIGINT PK auto` | Surrogate. |
-| `office_id` | `BIGINT NOT NULL UNIQUE` → `m_office.id` | One-to-one with office. |
-| `country_id` | `INT NOT NULL` → `m_code_value.id` | Country code value. |
-
-Foreign keys: `FK_m_office_country_office` → `m_office(id)`, `FK_m_office_country_country` → `m_code_value(id)`. Unique on `office_id` enforces 1:1.
 
 ## m_code — soft enumerations
 
@@ -196,8 +182,6 @@ Implements the entity-restrictions feature: which offices may originate which pr
 | Child | Column | Parent |
 | --- | --- | --- |
 | `c_external_service_properties` | `external_service_id` | `c_external_service(id)` |
-| `m_office_country` | `office_id` | `m_office(id)` |
-| `m_office_country` | `country_id` | `m_code_value(id)` |
 | `m_code_value` | `code_id` | `m_code(id)` |
 | `m_business_date` | n/a | self-contained |
 | `m_entity_to_entity_mapping` | `rel_id` | `m_entity_relation(id)` |
@@ -209,10 +193,9 @@ Implements the entity-restrictions feature: which offices may originate which pr
 | `c_configuration` | `name` unique | Flag lookup. |
 | `c_external_service` | `name` unique | Service lookup. |
 | `c_external_service_properties` | PK on (name, external_service_id) | Property lookup. |
-| `c_business_step_config` | unique `(job_name, step_name)` | Prevent dupes. |
-| `c_business_step_config` | `(job_name, step_order)` | Runtime ordering. |
+| `m_batch_business_steps` | unique `(job_name, step_name)` | Prevent dupes. |
+| `m_batch_business_steps` | `(job_name, step_order)` | Runtime ordering. |
 | `m_organisation_currency` | `code` unique | Currency lookup. |
-| `m_office_country` | `office_id` unique | 1:1 lookup. |
 | `m_code` | `code_name` unique | Code lookup. |
 | `m_code_value` | `(code_id, code_value)` unique | De-duplication. |
 | `m_business_date` | `type` unique | Single-row-per-type. |
@@ -233,7 +216,6 @@ Every portfolio table that needs an open-ended drop-down stores an `INT` column 
 | `m_loan` | `loanpurpose_cv_id` | `LoanPurpose` |
 | `m_group` | `closure_reason_cv_id` | `GroupClosureReason` |
 | `m_client_family_members` | `relationship_cv_id`, `marital_status_cv_id`, `profession_cv_id` | `FamilyMember*` |
-| `m_office_country` | `country_id` | `Country` |
 
 Because the cross-table joins are runtime FKs only ("logical" joins — the database does not always declare an FK to `m_code_value` for performance reasons), the integrity check is at the application layer: the `CodeValueRepositoryWrapper` validates that the value referenced belongs to the expected code.
 
@@ -253,10 +235,10 @@ The `ConfigurationDomainService` exposes the flags as named accessor methods tha
 
 `c_configuration.value` carries the integer payload (e.g. `30` for `min-clients-in-group`); `string_value` and `date_value` give the same row alternative payload shapes.
 
-## How c_business_step_config drives COB
+## How m_batch_business_steps drives COB
 
-The COB job at startup reads `c_business_step_config` filtered by its own `job_name`, sorts by `step_order`, and binds each row to a Spring Batch `Step` bean named the same as `step_name`. If a step name is present in the database but no bean is registered, the job startup fails fast with a clear error — preventing partial COB runs.
+The COB job at startup reads `m_batch_business_steps` filtered by its own `job_name`, sorts by `step_order`, and binds each row to a Spring Batch `Step` bean named the same as `step_name`. If a step name is present in the database but no bean is registered, the job startup fails fast with a clear error — preventing partial COB runs.
 
-To enable a new step in operations, a database INSERT into `c_business_step_config` is sufficient — no platform restart is required as long as the step's bean is already in the classpath.
+To enable a new step in operations, a database INSERT into `m_batch_business_steps` is sufficient — no platform restart is required as long as the step's bean is already in the classpath.
 
 These reference tables are the system's "control plane": together they decide which features are on, which currencies are in play, which COB steps run in what order, and which soft-enumeration values fill every `*_cv_id` foreign key across the portfolio schema. They change rarely — but every business transaction in Apache Fineract reads them.

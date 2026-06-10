@@ -39,7 +39,7 @@ public interface PropertyService {
 }
 ```
 
-The default implementation reads from `FineractProperties` (`fineract.partitioned.<jobName>.*`) so each job can be tuned independently from `application.properties` or environment variables. Operators tuning COB throughput will end up here:
+The default implementation reads from `FineractProperties` (`fineract.partitioned-job.partitioned-job-properties[N].*`, indexed by the job name) so each job can be tuned independently from `application.properties` or environment variables. Operators tuning COB throughput will end up here:
 
 * `partitionSize` — how many input rows go into one partition (e.g. how many loan IDs handed to one worker).
 * `chunkSize` — the Spring Batch chunk commit interval inside a partition.
@@ -170,14 +170,15 @@ When a job is too slow or too noisy, walk these knobs in order — all are reach
 ## Configuration example
 
 ```properties
-# Per-job overrides (illustrative)
-fineract.partitioned.LOAN_COB.partition-size=500
-fineract.partitioned.LOAN_COB.chunk-size=100
-fineract.partitioned.LOAN_COB.retry-limit=3
-fineract.partitioned.LOAN_COB.thread-pool.core-pool-size=4
-fineract.partitioned.LOAN_COB.thread-pool.max-pool-size=8
-fineract.partitioned.LOAN_COB.thread-pool.queue-capacity=200
-fineract.partitioned.LOAN_COB.poll-interval=1000
+# Per-job overrides — indexed list shape used in application.properties
+fineract.partitioned-job.partitioned-job-properties[0].job-name=LOAN_COB
+fineract.partitioned-job.partitioned-job-properties[0].chunk-size=100
+fineract.partitioned-job.partitioned-job-properties[0].partition-size=500
+fineract.partitioned-job.partitioned-job-properties[0].retry-limit=3
+fineract.partitioned-job.partitioned-job-properties[0].thread-pool-core-pool-size=4
+fineract.partitioned-job.partitioned-job-properties[0].thread-pool-max-pool-size=8
+fineract.partitioned-job.partitioned-job-properties[0].thread-pool-queue-capacity=200
+fineract.partitioned-job.partitioned-job-properties[0].poll-interval=1000
 ```
 
 The exact property names match the property service implementation — the SPI shape above is the stable contract.

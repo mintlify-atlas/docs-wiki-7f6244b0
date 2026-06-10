@@ -217,7 +217,7 @@ Each sub-command resolves to a `*ShareProductCommandHandler` registered by name 
 ```mermaid
 flowchart LR
   Req[POST /v1/products/share/42?command=activate] --> API[ProductsApiResource.handleCommands]
-  API --> CWB[CommandWrapperBuilder.createProductCommand<br/>('share','activate',42)]
+  API --> CWB["CommandWrapperBuilder.createProductCommand<br/>('share','activate',42)"]
   CWB --> CSS[CommandSourceWritePlatformService]
   CSS --> Reg[CommandHandler registry]
   Reg --> H[ActivateShareProductCommandHandler]

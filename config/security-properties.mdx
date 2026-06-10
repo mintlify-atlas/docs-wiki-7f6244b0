@@ -30,7 +30,7 @@ fineract.security.2fa.enabled=${FINERACT_SECURITY_2FA_ENABLED:false}
 fineract.security.hsts.enabled=${FINERACT_SECURITY_HSTS_ENABLED:false}
 ```
 
-- **basicauth.enabled** wires `BasicAuthTenantDetailsService` and the standard Spring Security basic filter chain. Username and password are matched against `m_appuser`.
+- **basicauth.enabled** wires `TenantAwareBasicAuthenticationFilter` (backed by `AuthTenantDetailsService`) into the Spring Security filter chain. Username and password are matched against `m_appuser`.
 - **oauth2.enabled** turns on JWT bearer-token validation through Spring Security's resource server.
 - **2fa.enabled** layers a one-time-passcode flow on top of basic or OAuth2 authentication. The 2FA module lives in `twofactor-tests` and `fineract-security`.
 - **hsts.enabled** sets the HTTP Strict-Transport-Security response header so browsers refuse plain HTTP.

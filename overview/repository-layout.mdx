@@ -58,7 +58,7 @@ The full list comes from `settings.gradle`. Below, each Gradle module has its pa
 | `fineract-core` | Domain primitives, JPA config, JSON command parsing, business date, tenant infra | `org.apache.fineract.infrastructure.core`, `org.apache.fineract.commands` | `FineractContext.java`, `FineractProperties.java`, `CommandWrapperBuilder.java`, `JsonCommand.java`, `BusinessDateApiResource.java` |
 | `fineract-security` | Spring Security wiring, BasicAuth + OAuth2 + 2FA filters | `org.apache.fineract.infrastructure.security` | `PlatformSecurityContext.java`, `TenantAwareBasicAuthenticationFilter.java`, `WebSecurityConfig.java` |
 | `fineract-validation` | Custom Hibernate Validator constraints | `org.apache.fineract.infrastructure.validation` | `DataValidatorBuilder.java`, `ApiParameterError.java` |
-| `fineract-cob` | Close-of-Business Spring Batch engine | `org.apache.fineract.cob` | `LoanCOBManagerService.java`, `BusinessDateResolver.java`, COB tasklet classes |
+| `fineract-cob` | Close-of-Business Spring Batch engine | `org.apache.fineract.cob` | `COBBusinessStep.java`, `BusinessStepService.java`, COB tasklet classes |
 
 ### Command bus
 
@@ -164,7 +164,7 @@ A handful of subprojects keep dependencies inline in `build.gradle` instead of a
     The enum `org.apache.fineract.infrastructure.jobs.service.JobName` in `fineract-core` lists every scheduled job. Implementations are scattered across portfolio modules.
   </Accordion>
   <Accordion title="Where is COB defined?">
-    `fineract-cob/src/main/java/org/apache/fineract/cob/` contains Spring Batch tasklets. The orchestrator is `LoanCOBManagerService`.
+    `fineract-cob/src/main/java/org/apache/fineract/cob/` contains the `COBBusinessStep` interface and shared infrastructure; per-product tasklets and the orchestrator (`LoanCOBManagerConfiguration`) live in `fineract-provider/src/main/java/org/apache/fineract/cob/`.
   </Accordion>
   <Accordion title="Where are external event schemas?">
     `fineract-avro-schemas/src/main/avro/` holds `.avsc` files. `fineract-provider` produces them through `ExternalEventProducer` implementations.

@@ -242,10 +242,6 @@ After the operator's `PUT`, the next call from a domain service repopulates the 
 | Reading a flag from a deeply-nested code path | Couples that code to configuration; prefer reading once at the top of the request and passing the value down. |
 | Using `string_value` for structured data | The field is opaque to the rest of the platform; if you find yourself parsing JSON out of it, model a proper table instead. |
 
-## Tests
-
-`GlobalConfigurationTest` flips a handful of flags and asserts platform behaviour changes — for example, that `maker-checker` toggles whether `POST /loans` returns immediately or routes through approval. Additional unit tests on `GlobalConfigurationValidationService` cover trap-door enforcement.
-
 ## Related
 
 - Caching strategy: [/core/cache](/core/cache).

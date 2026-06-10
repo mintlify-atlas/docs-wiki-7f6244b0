@@ -32,10 +32,10 @@ Acronyms are alphabetized by their letters (so "2FA" comes first), and class-sty
 | BCrypt | Password hashing algorithm used by `AppUser`. | `fineract-security/.../service/BCryptPasswordEncoderFineractWrapper.java` |
 | BusinessDate | Per-tenant logical "today" that drives schedules, accrual, and reporting independent of wall-clock time. | `fineract-core/src/main/java/org/apache/fineract/infrastructure/businessdate/api/BusinessDateApiResource.java` |
 | BusinessEvent | Domain event raised by a write service (e.g. `LoanApprovedBusinessEvent`); consumed by external-event producers and hooks. | `fineract-core/.../infrastructure/event/business/domain/BusinessEvent.java` |
-| COB | Close-of-Business: nightly batch that advances the business date and processes per-loan tasklets. | `fineract-cob/src/main/java/org/apache/fineract/cob/loan/LoanCOBManagerService.java` |
+| COB | Close-of-Business: nightly batch that advances the business date and processes per-loan tasklets. | `fineract-provider/src/main/java/org/apache/fineract/cob/loan/LoanCOBManagerConfiguration.java` |
 | CodeValue | Reference-data row (e.g. loan purpose, gender) attached to a `Code` lookup. | `fineract-core/.../infrastructure/codes/domain/CodeValue.java` |
 | CommandSource | Audit row written for every command, containing maker, checker, payload, and result hash. | `fineract-core/src/main/java/org/apache/fineract/commands/domain/CommandSource.java` |
-| CommandWrapper | Immutable record describing a command: action, entity, id, href, JSON body. | `fineract-core/src/main/java/org/apache/fineract/commands/service/CommandWrapper.java` |
+| CommandWrapper | Immutable record describing a command: action, entity, id, href, JSON body. | `fineract-core/src/main/java/org/apache/fineract/commands/domain/CommandWrapper.java` |
 | CommandWrapperBuilder | Builder API resource classes use to construct a `CommandWrapper` from an HTTP request. | `fineract-core/src/main/java/org/apache/fineract/commands/service/CommandWrapperBuilder.java` |
 | DataTable | User-extensible flat table attached to a core entity (loan, client, etc.); editable through generic CRUD endpoints. | `fineract-core/.../infrastructure/dataqueries/service/ReadWriteNonCoreDataService.java` |
 | ExternalEvent | Domain event serialized to Avro and published to Kafka or ActiveMQ for downstream consumers. | `fineract-core/.../infrastructure/event/external/service/ExternalEventService.java` |
@@ -45,18 +45,18 @@ Acronyms are alphabetized by their letters (so "2FA" comes first), and class-sty
 | FloatingRate | Configurable rate (e.g. prime + spread) with effective-dated periods; consumed by loan products. | `fineract-rates/.../portfolio/floatingrates/domain/FloatingRate.java` |
 | GL (General Ledger) | The double-entry book; rooted in a Chart of Accounts (`GLAccount`). | `fineract-accounting/.../glaccount/domain/GLAccount.java` |
 | GLIM | Group Loan Individual Monitoring — a parent loan that aggregates individual member loans for group lending. | `fineract-loan/.../portfolio/loanaccount/data/GLIMContainer.java` |
-| GSIM | Group Savings Individual Monitoring — analogous parent/child structure for savings accounts. | `fineract-savings/.../portfolio/savings/domain/GSIMContainer.java` |
+| GSIM | Group Savings Individual Monitoring — analogous parent/child structure for savings accounts. | `fineract-savings/.../portfolio/savings/data/GSIMContainer.java` |
 | Hook | Outbound HTTP webhook fired on configured events. | `fineract-core/.../infrastructure/hooks/domain/Hook.java` |
 | Idempotency | Mechanism that lets a client safely retry a write by supplying an `Idempotency-Key` header; second call returns the stored result. | `fineract-command/.../service/IdempotencyKeyResolver.java` |
-| InlineCOB | A synchronous COB run triggered on-demand for a single loan, instead of waiting for the nightly batch. | `fineract-cob/.../cob/loan/InlineLoanCOBExecutorServiceImpl.java` |
+| InlineCOB | A synchronous COB run triggered on-demand for a single loan, instead of waiting for the nightly batch. | `fineract-provider/.../cob/service/InlineLoanCOBExecutorServiceImpl.java` |
 | JdbcSupport | Helper that converts `ResultSet` columns to Java types with null-safety; used by every read-platform service. | `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/service/database/JdbcSupport.java` |
 | JobName | Enum listing every Quartz-scheduled background job (interest posting, dormancy, accrual…). | `fineract-core/.../infrastructure/jobs/service/JobName.java` |
 | JournalEntry | Single debit or credit posting against a GL account; the immutable record of accounting state. | `fineract-accounting/src/main/java/org/apache/fineract/accounting/journalentry/domain/JournalEntry.java` |
 | JsonCommand | Typed view of the JSON body sent with a write request; provides `stringValueOfParameterNamed` and friends. | `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/api/JsonCommand.java` |
 | LiquibaseChangelog | XML/SQL change set that evolves the schema; tenant-list and per-tenant trees are separate. | `fineract-db/src/main/resources/db/changelog/tenant/db.changelog-master.xml` |
-| LoanCOB | The specific Spring Batch job that processes per-loan COB tasklets. | `fineract-cob/src/main/java/org/apache/fineract/cob/loan/LoanCOBManagerService.java` |
+| LoanCOB | The specific Spring Batch job that processes per-loan COB tasklets. | `fineract-provider/src/main/java/org/apache/fineract/cob/loan/LoanCOBManagerConfiguration.java` |
 | LoanRepaymentSchedule | Ordered list of installment rows attached to a loan; each row carries principal, interest, fees, penalties, and due date. | `fineract-loan/.../portfolio/loanaccount/domain/LoanRepaymentScheduleInstallment.java` |
-| MakerChecker | Two-eye approval workflow: one user submits a command (maker), another approves it (checker) before it executes. | `fineract-command/.../service/MakerCheckerWritePlatformService.java` |
+| MakerChecker | Two-eye approval workflow: one user submits a command (maker), another approves it (checker) before it executes. | `fineract-provider/.../commands/data/request/MakerCheckerRequest.java` |
 | MifosX | Predecessor project; "Fineract 1.x" is essentially MifosX donated to the ASF. Many code paths still reference it. | repository history, `STATIC_WEAVING.md` |
 | NPA | Non-Performing Asset — a loan past a configurable arrears threshold; tracked for provisioning and reporting. | `fineract-loan/.../portfolio/loanaccount/loanschedule/.../LoanArrearsAgeingService.java` |
 | OIDC | OpenID Connect; integration via Spring Security OAuth2 resource server. | `fineract-security/.../config/SecurityConfig.java`, `oauth2-tests/` |
@@ -75,10 +75,10 @@ Acronyms are alphabetized by their letters (so "2FA" comes first), and class-sty
 | SqlInjectionPreventer | Validator that rejects free-form SQL identifiers containing dangerous tokens; used by ad-hoc data table endpoints. | `fineract-core/.../infrastructure/security/utils/SQLInjectionValidator.java` |
 | StandingInstruction | Pre-authorized periodic transfer between accounts (e.g. monthly savings into a loan repayment). | `fineract-savings/.../portfolio/account/domain/AccountTransferStandingInstruction.java` |
 | Survey / SPM | Social Performance Management module; structured client surveys with scoring. | `fineract-provider/.../spm/domain/Survey.java` |
-| Tasklet | Spring Batch unit of work used by COB; one tasklet per business step (e.g. apply charges, accrue interest). | `fineract-cob/.../cob/loan/ApplyChargeToOverdueLoansBusinessStep.java` |
+| Tasklet | Spring Batch unit of work used by COB; one tasklet per business step (e.g. apply charges, accrue interest). | `fineract-provider/.../cob/loan/ApplyChargeToOverdueLoansBusinessStep.java` |
 | TenantStore | Holds the current tenant for the request thread; populated by `TenantAwareBasicAuthenticationFilter`. | `fineract-core/.../infrastructure/core/service/ThreadLocalContextUtil.java` |
 | Teller | Cash drawer abstraction with cashier assignments and cash-handling transactions. | `fineract-provider/.../organisation/teller/domain/Teller.java` |
-| TwoFactor | Configuration object describing OTP delivery and validation policy. | `fineract-provider/.../infrastructure/security/service/TwoFactorService.java` |
+| TwoFactor | Configuration object describing OTP delivery and validation policy. | `fineract-security/.../infrastructure/security/service/TwoFactorService.java` |
 | WorkingCapitalLoan | Revolving working-capital credit product with disbursement and repayment cycles. | `fineract-working-capital-loan/src/main/java/.../portfolio/loanaccount/` |
 | WritePlatformService | Conventional name for the domain service that executes a command (e.g. `LoanWritePlatformService`). | `fineract-loan/.../portfolio/loanaccount/service/LoanWritePlatformService.java` |
 

@@ -113,10 +113,10 @@ The flow is **catalogue → client pledge → loan allocation**, with `pct_to_ba
 
 ```mermaid
 flowchart LR
-  Cat[CollateralManagementDomain<br/>Gold 22kt, basePrice=5000/g, pct=75]
-  Cat --> CCM[ClientCollateralManagement<br/>client=123, quantity=100g<br/>total=500000, eligible=375000]
-  CCM --> LCM1[LoanCollateralManagement<br/>loan=A, quantity=40g]
-  CCM --> LCM2[LoanCollateralManagement<br/>loan=B, quantity=60g]
+  Cat["CollateralManagementDomain<br/>Gold 22kt, basePrice=5000/g, pct=75"]
+  Cat --> CCM["ClientCollateralManagement<br/>client=123, quantity=100g<br/>total=500000, eligible=375000"]
+  CCM --> LCM1["LoanCollateralManagement<br/>loan=A, quantity=40g"]
+  CCM --> LCM2["LoanCollateralManagement<br/>loan=B, quantity=60g"]
 ```
 
 ## CollateralManagementApiResource — the catalogue REST API

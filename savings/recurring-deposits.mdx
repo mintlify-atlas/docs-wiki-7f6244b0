@@ -120,7 +120,7 @@ The `GENERATE_RD_SCEHDULE` job (note the historical typo) refills the schedule g
 
 ```mermaid
 flowchart LR
-    Activate[Activate RD] --> Schedule[Generate installments\n1..N up to first horizon]
+    Activate[Activate RD] --> Schedule[Generate installments<br/>1..N up to first horizon]
     Schedule --> Job[GENERATE_RD_SCEHDULE job]
     Job -->|fills future rows| Schedule
     Deposit[Deposit transaction] --> Allocate[handleInstallmentTransaction]

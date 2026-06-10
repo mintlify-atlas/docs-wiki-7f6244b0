@@ -192,14 +192,14 @@ The size of this cluster is the reason savings has its own Gradle subproject —
 
 ```mermaid
 flowchart LR
-    API[SavingsAccountsApiResource\nFixedDepositAccountsApiResource\nRecurringDepositAccountsApiResource\nSavingsProductsApiResource\nFixedDepositProductsApiResource\nRecurringDepositProductsApiResource\nInterestRateChartsApiResource] --> Handlers[Command handlers\nportfolio/savings/handler/*]
-    Handlers --> Write[Write platform services\nportfolio/savings/service/*WritePlatformService*]
-    Write --> Assemblers[Assemblers\nportfolio/savings/domain/*Assembler*]
-    Write --> Domain[Domain entities\nportfolio/savings/domain/*]
+    API[SavingsAccountsApiResource<br/>FixedDepositAccountsApiResource<br/>RecurringDepositAccountsApiResource<br/>SavingsProductsApiResource<br/>FixedDepositProductsApiResource<br/>RecurringDepositProductsApiResource<br/>InterestRateChartsApiResource] --> Handlers[Command handlers<br/>portfolio/savings/handler/*]
+    Handlers --> Write[Write platform services<br/>portfolio/savings/service/*WritePlatformService*]
+    Write --> Assemblers[Assemblers<br/>portfolio/savings/domain/*Assembler*]
+    Write --> Domain[Domain entities<br/>portfolio/savings/domain/*]
     Domain --> JPA[JPA / EclipseLink]
     JPA --> DB[(MariaDB / PostgreSQL)]
 
-    Read[Read platform services\nportfolio/savings/service/*ReadPlatformService*] --> JdbcTpl[JdbcTemplate]
+    Read[Read platform services<br/>portfolio/savings/service/*ReadPlatformService*] --> JdbcTpl[JdbcTemplate]
     JdbcTpl --> DB
     API --> Read
 ```

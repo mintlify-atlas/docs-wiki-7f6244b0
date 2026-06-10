@@ -1,32 +1,30 @@
 ---
 title: "Spring Batch and scheduler tables"
 sidebarTitle: "Jobs Model"
-description: "m_scheduler_job, m_scheduler_job_history, BATCH_JOB_EXECUTION, BATCH_STEP_EXECUTION, BATCH_JOB_EXECUTION_PARAMS — scheduler and Spring Batch metadata."
+description: "job, job_run_history, BATCH_JOB_EXECUTION, BATCH_STEP_EXECUTION, BATCH_JOB_EXECUTION_PARAMS — scheduler and Spring Batch metadata."
 ---
 
 Apache Fineract schedules every recurring job — interest postings, accrual, arrears ageing, delinquency classification, dormancy tracking, COB workflow steps — through two cooperating subsystems:
 
-1. A bespoke scheduler defined by `m_scheduler_job` and `m_scheduler_job_history`, which holds the cron expression, last-run audit, and lock fields per job.
+1. A bespoke scheduler defined by `job` and `job_run_history`, which holds the cron expression, last-run audit, and lock fields per job.
 2. The standard Spring Batch metadata schema (`BATCH_JOB_INSTANCE`, `BATCH_JOB_EXECUTION`, `BATCH_STEP_EXECUTION`, plus parameter and context tables) used by jobs implemented as Spring Batch jobs (notably the Close-of-Business workflow and the loan delinquency classifier).
 
-The Fineract-native tables ship in `fineract-provider/src/main/resources/db/changelog/tenant/parts/0001_initial_schema.xml`; the Spring Batch tables come from Spring's own `schema-mysql.sql` and `schema-postgresql.sql` and are wired in through `JobConfig`. This page documents both clusters so you can correlate a row in `m_scheduler_job` with its corresponding `BATCH_JOB_EXECUTION` row.
+The Fineract-native tables ship in `fineract-provider/src/main/resources/db/changelog/tenant/parts/0001_initial_schema.xml`; the Spring Batch tables come from Spring's own `schema-mysql.sql` and `schema-postgresql.sql` and are wired in through `JobConfig`. This page documents both clusters so you can correlate a row in `job` with its corresponding `BATCH_JOB_EXECUTION` row.
 
 ## Entity-relationship overview
 
 ```mermaid
 erDiagram
-    m_scheduler_job ||--o{ m_scheduler_job_history : "job_id"
-    m_scheduler_job ||--o{ job_parameters : "scheduler_job_id"
-    m_scheduler_job }o--o| job_run_history : "via job_id"
+    job ||--o{ job_run_history : "job_id"
+    job ||--o{ job_parameters : "job_id"
     BATCH_JOB_INSTANCE ||--o{ BATCH_JOB_EXECUTION : "JOB_INSTANCE_ID"
     BATCH_JOB_EXECUTION ||--o{ BATCH_JOB_EXECUTION_PARAMS : "JOB_EXECUTION_ID"
     BATCH_JOB_EXECUTION ||--o{ BATCH_JOB_EXECUTION_CONTEXT : "JOB_EXECUTION_ID"
     BATCH_JOB_EXECUTION ||--o{ BATCH_STEP_EXECUTION : "JOB_EXECUTION_ID"
     BATCH_STEP_EXECUTION ||--o{ BATCH_STEP_EXECUTION_CONTEXT : "STEP_EXECUTION_ID"
-    m_scheduler_job_run_history }o--|| m_scheduler_job : "job_id"
 ```
 
-## m_scheduler_job — the job registry
+## job — the job registry
 
 One row per scheduled job. Inserted at platform bootstrap by `JobRegisterServiceImpl` reading the `@CronTarget` annotations.
 
@@ -55,25 +53,25 @@ One row per scheduled job. Inserted at platform bootstrap by `JobRegisterService
 
 Indexes: `name` for lookup by name, `(node_id, is_active)` for clustered scanners.
 
-## m_scheduler_job_parameters
+## job_parameters
 
 Optional per-job parameters supplied at trigger time.
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `BIGINT PK auto` | Surrogate. |
-| `job_id` | `BIGINT NOT NULL` → `m_scheduler_job.id` | Owning job. |
+| `job_id` | `BIGINT NOT NULL` → `job.id` | Owning job. |
 | `parameter_name` | `VARCHAR(50)` | Key. |
 | `parameter_value` | `VARCHAR(50)` | Value. |
 
-## m_scheduler_job_run_history — audit
+## job_run_history — audit
 
 One row per executed run. Used by the `/jobs/{id}/runhistory` API.
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `BIGINT PK auto` | Surrogate. |
-| `job_id` | `BIGINT NOT NULL` → `m_scheduler_job.id` | Owning job. |
+| `job_id` | `BIGINT NOT NULL` → `job.id` | Owning job. |
 | `version` | `BIGINT NOT NULL` | Monotonic per-job execution counter. |
 | `start_time` | `datetime NOT NULL` | When run started. |
 | `end_time` | `datetime` | When run ended. |
@@ -82,11 +80,11 @@ One row per executed run. Used by the `/jobs/{id}/runhistory` API.
 | `trigger_type` | `VARCHAR(25) NOT NULL` | `cron`, `application`, `manual`. |
 | `error_log` | `text` | Stack trace. |
 
-Foreign key: `FK_m_scheduler_job_run_history_job` → `m_scheduler_job(id)` cascade delete. Index on `(job_id, version desc)` for the API's "latest 10 runs" query.
+Foreign key: `FK_job_run_history_job` → `job(id)` cascade delete. Index on `(job_id, version desc)` for the API's "latest 10 runs" query.
 
-## m_scheduler_group — concurrency groups
+## scheduler_group — concurrency groups
 
-A small table that lists the group ids used by `m_scheduler_job.scheduler_group` and the named lock each group serialises on.
+A small table that lists the group ids used by `job.scheduler_group` and the named lock each group serialises on.
 
 | Column | Type |
 | --- | --- |
@@ -94,7 +92,7 @@ A small table that lists the group ids used by `m_scheduler_job.scheduler_group`
 | `group_name` | `VARCHAR(50) NOT NULL UNIQUE` |
 | `version` | `BIGINT NOT NULL` |
 
-## m_scheduler_detail
+## scheduler_detail
 
 Singleton row holding the scheduler-wide pause flag and node election state.
 
@@ -213,8 +211,8 @@ Spring Batch also maintains `BATCH_STEP_EXECUTION_SEQ`, `BATCH_JOB_EXECUTION_SEQ
 
 | Child | Column | Parent |
 | --- | --- | --- |
-| `m_scheduler_job_run_history` | `job_id` | `m_scheduler_job(id)` |
-| `m_scheduler_job_parameters` | `job_id` | `m_scheduler_job(id)` |
+| `job_run_history` | `job_id` | `job(id)` |
+| `job_parameters` | `job_id` | `job(id)` |
 | `BATCH_JOB_EXECUTION` | `JOB_INSTANCE_ID` | `BATCH_JOB_INSTANCE` |
 | `BATCH_JOB_EXECUTION_PARAMS` | `JOB_EXECUTION_ID` | `BATCH_JOB_EXECUTION` |
 | `BATCH_JOB_EXECUTION_CONTEXT` | `JOB_EXECUTION_ID` | `BATCH_JOB_EXECUTION` |
@@ -225,24 +223,24 @@ Spring Batch also maintains `BATCH_STEP_EXECUTION_SEQ`, `BATCH_JOB_EXECUTION_SEQ
 
 | Table | Index | Use |
 | --- | --- | --- |
-| `m_scheduler_job` | `name` | Lookup. |
-| `m_scheduler_job` | `(node_id, is_active)` | Clustered scan. |
-| `m_scheduler_job_run_history` | `(job_id, version desc)` | Recent runs. |
+| `job` | `name` | Lookup. |
+| `job` | `(node_id, is_active)` | Clustered scan. |
+| `job_run_history` | `(job_id, version desc)` | Recent runs. |
 | `BATCH_JOB_INSTANCE` | unique `(JOB_NAME, JOB_KEY)` | De-dup. |
 | `BATCH_JOB_EXECUTION` | `(JOB_INSTANCE_ID, CREATE_TIME desc)` | Latest execution. |
 | `BATCH_STEP_EXECUTION` | `(JOB_EXECUTION_ID)` | Status report. |
 
-## Correlating m_scheduler_job_run_history and BATCH_JOB_EXECUTION
+## Correlating job_run_history and BATCH_JOB_EXECUTION
 
 A single COB run produces:
 
-- One row in `m_scheduler_job_run_history` with `job_id = <m_scheduler_job.id for COB>`, `trigger_type`, `start_time`, `end_time`, `status`.
+- One row in `job_run_history` with `job_id = <job.id for COB>`, `trigger_type`, `start_time`, `end_time`, `status`.
 - One row in `BATCH_JOB_INSTANCE` with `JOB_NAME = LOAN_COB` and a `JOB_KEY` derived from `(business-date, request-id)` parameters.
 - One row in `BATCH_JOB_EXECUTION` referencing the instance.
 - Two parameter rows in `BATCH_JOB_EXECUTION_PARAMS` (the business date and the request id).
 - Per-step rows in `BATCH_STEP_EXECUTION` — one per `c_business_step_config` row for the COB job.
 
-The cross-reference between the two systems is by wall-clock time: there is no shared id. Operations dashboards typically join `m_scheduler_job_run_history.start_time` with `BATCH_JOB_EXECUTION.START_TIME` within a small window.
+The cross-reference between the two systems is by wall-clock time: there is no shared id. Operations dashboards typically join `job_run_history.start_time` with `BATCH_JOB_EXECUTION.START_TIME` within a small window.
 
 ## Querying job execution status
 
@@ -251,8 +249,8 @@ The most useful operational queries:
 ```sql
 -- Was the most recent COB run successful?
 SELECT status, start_time, end_time, error_message
-FROM   m_scheduler_job_run_history
-WHERE  job_id = (SELECT id FROM m_scheduler_job WHERE name = 'Loan COB')
+FROM   job_run_history
+WHERE  job_id = (SELECT id FROM job WHERE name = 'Loan COB')
 ORDER  BY version DESC
 LIMIT  1;
 
@@ -271,14 +269,14 @@ ORDER  BY se.STEP_EXECUTION_ID;
 
 ## Cluster behaviour
 
-When multiple Apache Fineract nodes share a tenant database, the `node_id` column on `m_scheduler_job` pins each job to a specific node. The scheduler on each node periodically scans `m_scheduler_job` filtered by `node_id` and ignores jobs that belong to a sibling.
+When multiple Apache Fineract nodes share a tenant database, the `node_id` column on `job` pins each job to a specific node. The scheduler on each node periodically scans `job` filtered by `node_id` and ignores jobs that belong to a sibling.
 
 Spring Batch's metadata schema is shared across all nodes; the `BATCH_JOB_EXECUTION.LAST_UPDATED` column doubles as a heartbeat that a node updates while a step is alive. Sibling nodes use that heartbeat to detect crashed jobs and decide whether to take over.
 
 ## Misfired jobs
 
-If the scheduler is paused (`m_scheduler_detail.is_suspended = true`) or the node is offline when a trigger should fire, the job is marked as misfired. On startup, if `m_scheduler_detail.execute_misfired_jobs = true`, the scheduler will run misfired jobs once on resume.
+If the scheduler is paused (`scheduler_detail.is_suspended = true`) or the node is offline when a trigger should fire, the job is marked as misfired. On startup, if `scheduler_detail.execute_misfired_jobs = true`, the scheduler will run misfired jobs once on resume.
 
-`m_scheduler_job.is_misfired` reflects the most recent misfire state for the row, and the operational UI surfaces it on the jobs dashboard so ops can decide whether to force-run.
+`job.is_misfired` reflects the most recent misfire state for the row, and the operational UI surfaces it on the jobs dashboard so ops can decide whether to force-run.
 
-The relationship between the two clusters is loose but real: when the Fineract scheduler trigger fires a Spring Batch job, `m_scheduler_job_run_history` and `BATCH_JOB_EXECUTION` will both gain one row for the same wall-clock execution. The Fineract row is what the admin UI shows under "Recent runs", and the Spring Batch rows are what the developer reaches for when they need step-level chunk counts, skip stats, or restart context.
+The relationship between the two clusters is loose but real: when the Fineract scheduler trigger fires a Spring Batch job, `job_run_history` and `BATCH_JOB_EXECUTION` will both gain one row for the same wall-clock execution. The Fineract row is what the admin UI shows under "Recent runs", and the Spring Batch rows are what the developer reaches for when they need step-level chunk counts, skip stats, or restart context.

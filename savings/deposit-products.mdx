@@ -139,10 +139,10 @@ flowchart TD
     Admin --> RDProductsAPI[/v1/recurringdepositproducts/]
     ProductsAPI --> WPS[FixedDepositProductWritePlatformService]
     RDProductsAPI --> WPSR[RecurringDepositProductWritePlatformService]
-    WPS --> DB[(m_savings_product\nm_deposit_product_*\nm_deposit_product_interest_rate_chart)]
+    WPS --> DB[(m_savings_product<br/>m_deposit_product_*<br/>m_deposit_product_interest_rate_chart)]
     WPSR --> DB
 
-    NewAccount[New FD/RD application] --> Assembler[FixedDepositAccountAssembler\nRecurringDepositAccountAssembler]
+    NewAccount[New FD/RD application] --> Assembler[FixedDepositAccountAssembler<br/>RecurringDepositAccountAssembler]
     Assembler --> ProductRead[Read product + select active chart]
     ProductRead --> Materialise[Materialise term + chart + (RD) recurring detail on account]
     Materialise --> Account[(FixedDepositAccount / RecurringDepositAccount rows)]

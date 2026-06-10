@@ -1,7 +1,7 @@
 ---
 title: "COB and investor model tables"
 sidebarTitle: "COB & Investor Model"
-description: "m_loan_account_lock, m_savings_account_lock, m_wc_loan_account_lock, m_external_asset_owner, m_external_asset_owner_transfer."
+description: "m_loan_account_locks, m_external_asset_owner, m_external_asset_owner_transfer and related investor mapping tables."
 ---
 
 Two distinct concerns share this page because they overlap operationally: the Close-of-Business (COB) account-lock tables, which serialise access between the COB worker and online write commands, and the investor / external-asset-owner tables, which model the sale and transfer of loan portfolios to off-platform investors. Both clusters were added relatively late in Apache Fineract's evolution and live in their own Liquibase modules — `fineract-provider` for the COB locks (`parts/0039_add_loan_account_locks.xml` onwards, plus parallel changesets for savings and working-capital loans) and `fineract-investor/src/main/resources/db/changelog/tenant/module/investor/parts/` for the investor schema.
@@ -11,8 +11,6 @@ Two distinct concerns share this page because they overlap operationally: the Cl
 ```mermaid
 erDiagram
     m_loan ||--o| m_loan_account_locks : "loan_id"
-    m_savings_account ||--o| m_savings_account_locks : "savings_id"
-    m_loan ||--o| m_wc_loan_account_locks : "loan_id"
     m_external_asset_owner ||--o{ m_external_asset_owner_transfer : "owner_id"
     m_loan ||--o{ m_external_asset_owner_transfer : "loan_id"
     m_external_asset_owner_transfer ||--o| m_external_asset_owner_transfer_details : "transfer_id"
@@ -46,37 +44,9 @@ Foreign key: `fk_loan_id` → `m_loan(id)` on delete restrict.
 
 Indexes: PK on `loan_id` already gives fast lookup; some deployments add `lock_owner` for monitoring queries.
 
-## m_savings_account_locks — savings counterpart
+## Savings and other account lock tables
 
-Same shape as the loan lock table but for savings accounts. Added so the same COB serialisation pattern can be applied to savings interest posting / dormancy jobs.
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `savings_id` | `BIGINT PK` → `m_savings_account.id` | One-to-one with account. |
-| `lock_owner` | `VARCHAR(100) NOT NULL` | `SAVINGS_COB_CHUNK_PROCESSING_WORKER` or `SAVINGS_INLINE_COB_PROCESSING`. |
-| `lock_placed_on` | `TIMESTAMP NOT NULL` | Acquisition time. |
-| `lock_placed_on_cob_business_date` | `DATE` | COB business date. |
-| `error` | `VARCHAR(255)` | Error message. |
-| `stacktrace` | `TEXT` | Full trace. |
-| `version` | `BIGINT NOT NULL` | Optimistic lock. |
-
-Foreign key on `savings_id` → `m_savings_account(id)`.
-
-## m_wc_loan_account_locks — working-capital loan lock
-
-Working-capital loans (per the `fineract-working-capital-loan` module) have their own dedicated lock table to keep their COB pipeline isolated from regular loans.
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `loan_id` | `BIGINT PK` → `m_loan.id` | One-to-one with working-capital loan. |
-| `lock_owner` | `VARCHAR(100) NOT NULL` | Worker identifier. |
-| `lock_placed_on` | `TIMESTAMP NOT NULL` | Acquisition time. |
-| `lock_placed_on_cob_business_date` | `DATE` | COB business date. |
-| `error` | `VARCHAR(255)` | Error message. |
-| `stacktrace` | `TEXT` | Full trace. |
-| `version` | `BIGINT NOT NULL` | Optimistic lock. |
-
-Foreign key on `loan_id` → `m_loan(id)`.
+Upstream Apache Fineract ships only `m_loan_account_locks` for COB serialisation. There is no separate `m_savings_account_locks` or working-capital lock table in the standard distribution — savings COB and any custom pipelines either reuse the same serialisation pattern in a downstream fork or rely on the in-flight transaction boundary instead of a row-level lock table. If a deployment adds one, mirror the column shape of `m_loan_account_locks`.
 
 ## m_external_asset_owner — investor registry
 
@@ -186,8 +156,6 @@ Indexed on `(external_asset_owner_id, loan_product_id)` — added in `0017_add_e
 | Child | Column | Parent |
 | --- | --- | --- |
 | `m_loan_account_locks` | `loan_id` | `m_loan(id)` |
-| `m_savings_account_locks` | `savings_id` | `m_savings_account(id)` |
-| `m_wc_loan_account_locks` | `loan_id` | `m_loan(id)` |
 | `m_external_asset_owner` | `created_by` / `last_modified_by` | `m_appuser(id)` |
 | `m_external_asset_owner_transfer` | `owner_id` | `m_external_asset_owner(id)` |
 | `m_external_asset_owner_transfer` | `previous_owner_id` | `m_external_asset_owner(id)` |
@@ -205,8 +173,6 @@ Indexed on `(external_asset_owner_id, loan_product_id)` — added in `0017_add_e
 | Table | Index | Use |
 | --- | --- | --- |
 | `m_loan_account_locks` | PK on `loan_id` | Lock check. |
-| `m_savings_account_locks` | PK on `savings_id` | Lock check. |
-| `m_wc_loan_account_locks` | PK on `loan_id` | Lock check. |
 | `m_external_asset_owner` | unique on `external_id` | Owner lookup. |
 | `m_external_asset_owner_transfer` | `external_id`, `status`, `settlement_date`, `effective_date_to`, `loan_id`, `owner_id` | Transfer queries and COB scans. |
 | `m_external_asset_owner_transfer_details` | unique on `transfer_id` | 1:1 lookup. |

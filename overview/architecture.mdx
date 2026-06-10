@@ -86,7 +86,7 @@ Several capabilities span all layers and are configured once at the application 
 | Authorization | Permission strings (`PORTFOLIO_PRODUCT.CREATE_LOAN`) checked in handlers via `PlatformSecurityContext` | `PlatformSecurityContext`, `Permission` |
 | Audit | Every command writes `m_portfolio_command_source`; Maker/Checker uses the same row | `CommandSource`, `fineract-command-audit` |
 | Idempotency | Client sends `Idempotency-Key`; duplicates short-circuit to the stored result | `IdempotencyKeyResolver`, `CommandSource.idempotencyKey` |
-| Close-of-Business | Spring Batch jobs run nightly per tenant to age accounts, accrue interest, run penalties | `fineract-cob`, `LoanCOBManagerService` |
+| Close-of-Business | Spring Batch jobs run nightly per tenant to age accounts, accrue interest, run penalties | `fineract-cob`, `LoanCOBManagerConfiguration` |
 | Scheduled jobs | Quartz scheduler runs background jobs (interest posting, holiday roll, dormancy) | `JobName`, `ScheduledJobRunnerService` |
 | External events | Domain events serialized to Avro and published to Kafka or ActiveMQ | `fineract-avro-schemas`, `ExternalEventProducer` |
 | Business date | Per-tenant `BusinessDate` decouples "today" from wall-clock time | `BusinessDate`, `BusinessDateApiResource` |

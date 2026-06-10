@@ -161,7 +161,7 @@ Running multiple JVMs against the same database without an external lock can pro
 
 ## Scheduler and COB
 
-Quartz starts during context refresh (when `fineract.mode.batch-manager-enabled=true`). Job names are enumerated by `org.apache.fineract.infrastructure.jobs.service.JobName`. Some jobs (interest posting, fee charges) run inside the request thread on a cron, while COB-related jobs (`LOAN_COB`, accrual postings, dormancy) are orchestrated by `LoanCOBManagerService` in `fineract-cob`.
+Quartz starts during context refresh (when `fineract.mode.batch-manager-enabled=true`). Job names are enumerated by `org.apache.fineract.infrastructure.jobs.service.JobName`. Some jobs (interest posting, fee charges) run inside the request thread on a cron, while COB-related jobs (`LOAN_COB`, accrual postings, dormancy) are orchestrated by `LoanCOBManagerConfiguration` in `fineract-provider`'s `cob/loan/` package, on top of the `COBBusinessStep` abstractions defined in `fineract-cob`.
 
 The COB engine is a Spring Batch job that:
 

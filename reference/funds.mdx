@@ -69,11 +69,11 @@ private Fund fund;
 
 ```mermaid
 flowchart LR
-  Donor[Donor / programme<br/>e.g. Triodos, KfW] --> Fund[Fund row in m_fund]
-  Fund -.fund_id.-> L1[Loan #1]
-  Fund -.fund_id.-> L2[Loan #2]
-  Fund -.fund_id.-> L3[Loan #3]
-  L1 --> RPT[Portfolio reports<br/>group by fundId]
+  Donor["Donor / programme<br/>e.g. Triodos, KfW"] --> Fund["Fund row in m_fund"]
+  Fund -.fund_id.-> L1["Loan #1"]
+  Fund -.fund_id.-> L2["Loan #2"]
+  Fund -.fund_id.-> L3["Loan #3"]
+  L1 --> RPT["Portfolio reports<br/>group by fundId"]
   L2 --> RPT
   L3 --> RPT
 ```

@@ -167,7 +167,7 @@ The quote endpoint is where Apache Fineract gets to add its own pricing. The ser
 3. Calculates any fees that should attach (account-level fees, transaction-level fees configured on the savings product).
 4. Returns the signed quote response with the gross/net amounts and the commit-by timestamp.
 
-The fee component is the natural extension point — write a custom `InteropQuoteService` and replace the bean if your switch agreement has bespoke pricing.
+The fee component is the natural extension point — override the quote handling in a custom `InteropService` implementation if your switch agreement has bespoke pricing.
 
 ## Disbursement via interop
 

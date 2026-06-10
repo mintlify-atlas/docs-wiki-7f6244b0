@@ -127,9 +127,9 @@ JPA is the right tool for command-side mutation, but Fineract's read services us
 JdbcSupport.getLong(rs, "loan_id");
 JdbcSupport.getLongDefaultToNullIfZero(rs, "office_id");
 JdbcSupport.getInteger(rs, "status_enum");
-JdbcSupport.getIntegeOrNull(rs, "term_frequency");
+JdbcSupport.getIntegerDefaultToNullIfZero(rs, "term_frequency");
 JdbcSupport.getLocalDate(rs, "approved_on_date");
-JdbcSupport.getLocalDateTime(rs, "created_on_utc");
+JdbcSupport.getOffsetDateTime(rs, "created_on_utc");
 JdbcSupport.getBigDecimalDefaultToNullIfZero(rs, "principal_amount");
 JdbcSupport.getBigDecimalDefaultToZeroIfNull(rs, "fee_charges_outstanding_derived");
 ```

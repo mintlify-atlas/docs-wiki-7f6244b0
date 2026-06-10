@@ -1,10 +1,10 @@
 ---
 title: "Commands and audit tables"
 sidebarTitle: "Audit Model"
-description: "m_portfolio_command_source, m_audit, m_audit_log, c_external_event, c_external_event_configuration — the command audit and event outbox."
+description: "m_portfolio_command_source, m_external_event, m_external_event_configuration — the command audit and event outbox."
 ---
 
-Every write into Apache Fineract is a command — a JSON envelope that flows through the command framework, gets routed to a handler, and produces a deterministic side-effect. Two table clusters back that pipeline. The first records the command itself and its maker-checker lifecycle in `m_portfolio_command_source` (with `m_audit_query` and `m_audit_log` historically used for raw audit log entries). The second is the external-event outbox in `c_external_event` and `c_external_event_configuration`, which captures the business events emitted by command handlers and replays them to downstream subscribers.
+Every write into Apache Fineract is a command — a JSON envelope that flows through the command framework, gets routed to a handler, and produces a deterministic side-effect. Two table clusters back that pipeline. The first records the command itself and its maker-checker lifecycle in `m_portfolio_command_source`. The second is the external-event outbox in `m_external_event` and `m_external_event_configuration`, which captures the business events emitted by command handlers and replays them to downstream subscribers.
 
 The command-source tables are defined in `fineract-command-jdbc/src/main/resources/db/changelog/tenant/module/command/parts/`. The external-event tables come from `fineract-provider`'s changelog and the dedicated `events` module.
 
@@ -16,9 +16,8 @@ erDiagram
     m_portfolio_command_source }o--o| m_appuser : "checker_id"
     m_portfolio_command_source }o--o| m_office : "office_id"
     m_portfolio_command_source }o--o| m_appuser : "rejected_by_id"
-    c_external_event_configuration ||--o{ c_external_event : "type"
-    c_external_event ||--o{ c_external_event : "idempotency_key"
-    m_audit_log }o--o| m_appuser : "appuser_id"
+    m_external_event_configuration ||--o{ m_external_event : "type"
+    m_external_event ||--o{ m_external_event : "idempotency_key"
 ```
 
 ## m_portfolio_command_source — the command audit
@@ -83,7 +82,7 @@ The same row goes through different states tracked by `processing_result_enum`:
 3. Checker rejects → `processing_result_enum = 3`, `checker_id` / `checked_on_date` populated, no side effect applied.
 4. Idempotent retry of an already-processed command → handler finds an existing row by `idempotency_key`, replays `result` / `result_status_code` to the caller without touching state.
 
-## c_external_event — outbox
+## m_external_event — outbox
 
 The transactional outbox written by command handlers. Read by the external-event publisher and replayed to subscribers (Kafka, webhooks).
 
@@ -104,49 +103,20 @@ The transactional outbox written by command handlers. Read by the external-event
 
 Indexes: `(status, created_at)` to drive the publisher's polling query, `(type, created_at)` for per-type replays, `(aggregate_root_id, type)` for entity replays.
 
-## c_external_event_configuration
+## m_external_event_configuration
 
 One row per registrable event type — toggled by ops to enable / disable publishing.
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `type` | `VARCHAR(100) PK` | Event type name (matches `c_external_event.type`). |
+| `type` | `VARCHAR(100) PK` | Event type name (matches `m_external_event.type`). |
 | `enabled` | `BOOLEAN NOT NULL` | Master switch. |
 
 The set of rows is seeded by Liquibase changesets every time a new event type ships (e.g. `1004_add_external_event_configuration_for_down_payment_transaction_event.xml`, `1013_add_loan_account_delinquency_pause_changed_event.xml`).
 
-## m_audit_log — legacy audit log
+## On historical audit tables
 
-Historical generic audit log used by some entities. Still present in fresh tenants for backwards compatibility.
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `BIGINT PK auto` | Surrogate. |
-| `action_name` | `VARCHAR(100) NOT NULL` | Action verb. |
-| `entity_name` | `VARCHAR(100) NOT NULL` | Affected entity. |
-| `resource_id` | `BIGINT` | Affected id. |
-| `subresource_id` | `BIGINT` | Affected sub-id. |
-| `maker_id` | `BIGINT NOT NULL` → `m_appuser.id` | Acting user. |
-| `made_on_date` | `datetime NOT NULL` | Timestamp. |
-| `checker_id` | `BIGINT` → `m_appuser.id` | Approver (legacy). |
-| `checked_on_date` | `datetime` | Approval time. |
-| `processing_result_enum` | `SMALLINT NOT NULL` | Status. |
-| `command_as_json` | `text` | Frozen request payload. |
-| `office_id` / `group_id` / `client_id` / `loan_id` / `savings_account_id` | references | Scope fields mirroring `m_portfolio_command_source`. |
-| `api_get_url` | `VARCHAR(100)` | Resource URL. |
-
-Modern Fineract treats this as deprecated — `m_portfolio_command_source` is the source of truth. `m_audit` is similarly a legacy variant.
-
-## Companion: m_audit_query
-
-A small per-tenant cache of saved audit queries (filters used by operators). Effectively a key/value of saved search criteria — referenced by the legacy audit UI.
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `BIGINT PK auto` | Surrogate. |
-| `name` | `VARCHAR(100) NOT NULL UNIQUE` | Saved query name. |
-| `query_string` | `text NOT NULL` | Serialised filter. |
-| `appuser_id` | `BIGINT` → `m_appuser.id` | Owner. |
+Older Fineract codebases referenced separate `m_audit_log` / `m_audit` / `m_audit_query` tables for generic auditing. Upstream Apache Fineract has consolidated on `m_portfolio_command_source` as the single source of truth for both the command audit and the maker-checker lifecycle — there are no standalone `m_audit*` tables shipped in the current changelog. The audit search APIs and the maker-checker inbox both read directly from `m_portfolio_command_source`.
 
 ## Foreign keys summary
 
@@ -158,8 +128,7 @@ A small per-tenant cache of saved audit queries (filters used by operators). Eff
 | `m_portfolio_command_source` | `client_id` | `m_client(id)` |
 | `m_portfolio_command_source` | `loan_id` | `m_loan(id)` |
 | `m_portfolio_command_source` | `savings_account_id` | `m_savings_account(id)` |
-| `m_audit_log` | `maker_id` / `checker_id` | `m_appuser(id)` |
-| `c_external_event` | (logical) `type` | `c_external_event_configuration(type)` |
+| `m_external_event` | (logical) `type` | `m_external_event_configuration(type)` |
 
 ## Indexes summary
 
@@ -171,11 +140,9 @@ A small per-tenant cache of saved audit queries (filters used by operators). Eff
 | `m_portfolio_command_source` | `(checker_id, checked_on_date)` | Checker dashboards. |
 | `m_portfolio_command_source` | `idempotency_key` | Idempotent retries. |
 | `m_portfolio_command_source` | `(processing_result_enum, made_on_date)` | Awaiting-approval queue. |
-| `c_external_event` | `(status, created_at)` | Publisher polling. |
-| `c_external_event` | `(type, created_at)` | Per-type replay. |
-| `c_external_event` | `(aggregate_root_id, type)` | Entity replay. |
-| `m_audit_log` | `(entity_name, resource_id)` | Legacy audit per entity. |
-| `m_audit_log` | `made_on_date` | Legacy timeline. |
+| `m_external_event` | `(status, created_at)` | Publisher polling. |
+| `m_external_event` | `(type, created_at)` | Per-type replay. |
+| `m_external_event` | `(aggregate_root_id, type)` | Entity replay. |
 
 ## Idempotency in practice
 
@@ -187,14 +154,14 @@ The `idempotency_key` column on `m_portfolio_command_source` was added so client
 4. If a row is found and `processing_result_enum = 4` (under processing), the framework returns HTTP 409 Conflict to signal "still processing".
 5. If no row is found, a fresh command is enqueued and the idempotency key is reserved.
 
-This makes the table the durable backing store for at-least-once REST semantics — the same guarantee Apache Fineract gives Kafka consumers and webhook subscribers through `c_external_event`.
+This makes the table the durable backing store for at-least-once REST semantics — the same guarantee Apache Fineract gives Kafka consumers and webhook subscribers through `m_external_event`.
 
 ## Worked example: loan disbursement
 
 A successful loan disbursement produces:
 
 - One row in `m_portfolio_command_source` with `entity_name = LOAN`, `action_name = DISBURSE`, `resource_id = <loan id>`, `processing_result_enum = 1`, the request JSON in `command_as_json`, and the produced loan-transaction id in `transaction_id`.
-- Multiple rows in `c_external_event` — at minimum `LoanDisbursalBusinessEvent` and `LoanDisbursalTransactionBusinessEvent`, with `aggregate_root_id = <loan id>` and `status = READY_TO_BE_SENT`.
+- Multiple rows in `m_external_event` — at minimum `LoanDisbursalBusinessEvent` and `LoanDisbursalTransactionBusinessEvent`, with `aggregate_root_id = <loan id>` and `status = READY_TO_BE_SENT`.
 - Each event row's `idempotency_key` carries the same UUID as the command, allowing downstream consumers to de-duplicate.
 - Once the external-event publisher dispatches a row, `status` flips to `SENT` and `sent_at` is stamped.
 
@@ -222,7 +189,7 @@ The corresponding outbox query the publisher polls is:
 
 ```sql
 SELECT id, type, aggregate_root_id, data
-FROM   c_external_event
+FROM   m_external_event
 WHERE  status = 'READY_TO_BE_SENT'
 ORDER  BY created_at
 LIMIT  ?;
@@ -235,7 +202,7 @@ The polling query is the reason the `(status, created_at)` index exists — with
 Both tables can grow large in busy tenants. Common operational patterns:
 
 - `m_portfolio_command_source` is rarely archived because it is the legal audit trail; deployments usually rely on partitioning by `made_on_date`.
-- `c_external_event` rows with `status = SENT` and `sent_at < now() - retention window` can be deleted by a purge job. The platform ships no purge job out of the box; operations teams typically define one with a small SQL window.
+- `m_external_event` rows with `status = SENT` and `sent_at < now() - retention window` can be deleted by a purge job. The platform ships no purge job out of the box; operations teams typically define one with a small SQL window.
 
 ## Maker-checker permission codes
 
@@ -253,7 +220,7 @@ When the platform-wide maker-checker flag is on and the user has only the plain 
 
 ## External event categories
 
-The categories on `c_external_event` group the type catalogue into roughly the following buckets, which match the modules that emit them:
+The categories on `m_external_event` group the type catalogue into roughly the following buckets, which match the modules that emit them:
 
 | Category | Example types |
 | --- | --- |
@@ -268,4 +235,4 @@ The categories on `c_external_event` group the type catalogue into roughly the f
 
 Each category corresponds to a `BusinessEvent` class in `fineract-core/src/main/java/org/apache/fineract/infrastructure/event/business/domain/`.
 
-The command and audit tables therefore close the loop on every state-changing write: a single row in `m_portfolio_command_source` carries the request, its maker-checker state, and the result envelope; matching rows in `c_external_event` describe the downstream business events that command produced; together they provide the deterministic audit trail and the integration contract for everything that ever happened on the tenant.
+The command and audit tables therefore close the loop on every state-changing write: a single row in `m_portfolio_command_source` carries the request, its maker-checker state, and the result envelope; matching rows in `m_external_event` describe the downstream business events that command produced; together they provide the deterministic audit trail and the integration contract for everything that ever happened on the tenant.

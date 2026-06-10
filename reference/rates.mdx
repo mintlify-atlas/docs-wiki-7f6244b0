@@ -12,11 +12,12 @@ description: "The Rate entity in Apache Fineract — percentage modifiers (typic
 fineract-core
 └── org.apache.fineract.portfolio.rate
     ├── data/        RateData
-    └── domain/      Rate, RateAppliesTo, RateRepository, RateRepositoryWrapper
+    └── domain/      Rate, RateAppliesTo
 
 fineract-provider
 └── org.apache.fineract.portfolio.rate
     ├── api/         RateApiResource, RateApiConstants, RateRequest
+    ├── domain/      RateRepository, RateRepositoryWrapper
     ├── exception/   RateNotFoundException, …
     ├── handler/     CreateRateCommandHandler, UpdateRateCommandHandler
     └── service/     RateReadPlatformService, RateWritePlatformService,

@@ -91,12 +91,12 @@ The read endpoint accepts a `?fields=` query string for projection (e.g. `?field
 ```mermaid
 flowchart LR
     REQ[POST /v1/clients/42/notes] --> RES[NotesApiResource]
-    RES --> NT[NoteType.fromApiUrl &quot;clients&quot;]
+    RES --> NT["NoteType.fromApiUrl('clients')"]
     NT -- null --> ERR[NoteResourceNotSupportedException]
     NT -- CLIENT --> DISP[CommandDispatcher.dispatch<br/>NoteCreateCommand]
     DISP --> H[NoteCreateCommandHandler]
     H --> WP[NoteWritePlatformServiceImpl]
-    WP --> N[new Note(client=42, type=CLIENT, note=&quot;...&quot;)]
+    WP --> N["new Note(client=42, type=CLIENT, note=...)"]
     N --> R[NoteRepository.save]
 ```
 

@@ -358,7 +358,8 @@
               "data/database-dialect-abstraction",
               "data/jdbc-template-services",
               "data/audit-fields",
-              "data/connection-pooling"
+              "data/connection-pooling",
+              "data/transactional-boundaries"
             ]
           },
           {
@@ -371,20 +372,35 @@
               "models/accounting-model",
               "models/client-model",
               "models/user-and-permissions-model",
-              "models/audit-and-commands-model"
+              "models/audit-and-commands-model",
+              "models/configuration-model",
+              "models/jobs-model",
+              "models/cob-and-investor-model"
             ]
           },
           {
             "group": "API Reference",
             "pages": [
               "api/overview",
+              "api/authentication",
+              "api/loans-api",
+              "api/loan-products-api",
+              "api/savings-api",
+              "api/deposit-accounts-api",
+              "api/clients-api",
+              "api/groups-and-centers-api",
+              "api/accounting-api",
               "api/codes-and-reference-api",
               "api/users-and-permissions-api",
               "api/organisation-api",
+              "api/scheduler-jobs-api",
               "api/cob-and-jobs-api",
+              "api/business-step-config-api",
               "api/datatables-and-data-queries-api",
               "api/external-events-api",
               "api/notifications-and-templates-api",
+              "api/investor-api",
+              "api/reports-api",
               "batch/batch-api-service"
             ]
           },
@@ -407,28 +423,33 @@
           {
             "group": "Configuration & Environment",
             "pages": [
+              "config/overview",
               "config/application-properties",
               "config/environment-variables",
               "config/fineract-properties",
               "config/security-properties",
+              "config/database-properties",
               "config/feature-flags-and-modes"
             ]
           },
           {
             "group": "Build, Test & Deployment",
             "pages": [
+              "build/overview",
               "build/gradle-layout",
-              "build/docker-image",
+              "build/dependency-management",
               "build/code-quality",
-              "build/release-process",
               "build/testing",
               "build/cucumber-features",
-              "build/dependency-management"
+              "build/docker-image",
+              "build/release-process",
+              "build/ci-and-github-actions"
             ]
           },
           {
             "group": "Generated Clients",
             "pages": [
+              "clients/overview",
               "clients/fineract-client"
             ]
           }

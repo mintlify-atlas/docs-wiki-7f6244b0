@@ -14,7 +14,7 @@ Every external event Apache Fineract puts on a broker is **Avro-encoded**, and t
 - A single source of truth for schema evolution — adding a field to `LoanAccountDataV1` is a change in one file, not scattered across producers.
 - A clean build-time codegen step (Avro `SpecificRecord` generation) without polluting the domain modules.
 
-The Java classes the schemas generate live in `fineract-avro-schemas/src/main/java/org/apache/fineract/avro` after a build.
+The Java classes the schemas generate land in `fineract-avro-schemas/build/generated/java/src/main/java/org/apache/fineract/avro` after a Gradle build (the hand-written `src/main/java/org/apache/fineract/avro/generator` package only contains the preprocessor that resolves the BigDecimal template before generation).
 
 ## Module layout
 
@@ -210,7 +210,7 @@ Avro schemas in this module follow these conventions:
 
 1. **Versioned classes.** A breaking change becomes `…DataV2`, not a modified `…DataV1`. The envelope's `dataschema` field gives consumers an unambiguous switch.
 2. **Additive changes only on V*.** New optional fields with defaults can be added to an existing `…DataV1` because Avro supports forward/backward compatibility for nullable additions; required fields cannot.
-3. **Generated classes only.** Hand-edited code under `fineract-avro-schemas/src/main/java/…` is not allowed — the Avro maven plugin regenerates everything from the `.avsc` files at build time.
+3. **Generated classes only.** Hand-edited code under `fineract-avro-schemas/build/generated/…` is not allowed — the Gradle Avro plugin (`com.github.davidmc24.gradle.plugin.avro-base`) regenerates everything from the `.avsc` files at build time. The only hand-written code in the module is the schema preprocessor under `src/main/java/org/apache/fineract/avro/generator`.
 4. **One envelope for all.** `MessageV1` is intentionally underspecified at the payload level (`data: bytes`) so payloads can evolve independently.
 
 <Info>

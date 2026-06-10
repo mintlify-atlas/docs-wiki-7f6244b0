@@ -1,7 +1,7 @@
 ---
 title: "Credit bureau integration framework"
 sidebarTitle: "Credit Bureau"
-description: "org.apache.fineract.infrastructure.creditbureau — CreditBureau, OrganisationCreditBureau, CreditBureauConfiguration; LoanProductCreditBureauMapping; report API."
+description: "org.apache.fineract.infrastructure.creditbureau — CreditBureau, OrganisationCreditBureau, CreditBureauConfiguration; CreditBureauLoanProductMapping; report API."
 ---
 
 Credit bureaus are the canonical example of an external lookup that an MFI cares about: during loan origination you want to know whether the applicant has been seen before, what their existing exposure is, and what risk class they fell into last time. Apache Fineract ships a framework — not a finished adapter — for plugging bureau providers into the origination workflow. This page describes the data model, the configuration surface, the report-fetching API, and how a tenant wires a specific provider in.
